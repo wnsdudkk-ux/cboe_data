@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.pem
+.DS_Store
+Thumbs.db
+# 임시 산출물 (완성된 아카이브 data/daily/*.tar.gz 는 커밋 대상)
+*.tar.gz.tmp
