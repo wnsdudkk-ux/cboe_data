@@ -76,7 +76,7 @@ CSV_COLUMNS = ["Symbol", "Expiry", "Type", "Strike", "Bid", "Ask", "Last",
 # --sp500-only 로 제외할 수 있다.
 EXTRA_INDICES = ["SPX", "VIX", "NDX", "RUT", "DJX"]
 EXTRA_ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "USO", "CPER", "IEF",
-              "TLT", "XLF", "EEM", "FXY", "UUP", "PPLT", "PALL", "IBIT"]
+              "TLT", "XLF", "EEM", "FXY", "UUP", "PPLT", "PALL", "IBIT", "SOXX"]
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cboe_collect")
