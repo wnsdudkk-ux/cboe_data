@@ -29,7 +29,7 @@ tar -xzf data/daily/quotes_20260702.tar.gz        # 현재 폴더에 풀림
 - **S&P500 구성종목** (~503개): 매 실행 시 [datasets/s-and-p-500-companies](https://github.com/datasets/s-and-p-500-companies)
   에서 최신 명단을 받아오고, 실패 시 저장소의 `sp500_fallback.txt` 스냅샷 사용.
   클래스주는 CBOE가 요구하는 점 표기(BRK.B, BF.B) 그대로.
-- **지수 5** (SPX·VIX·NDX·RUT·DJX) + **ETF 17** (SPY·QQQ 등): 분석의 핵심
+- **지수 5** (SPX·VIX·NDX·RUT·DJX) + **ETF 18** (SPY·QQQ·SOXX 등): 분석의 핵심
   기초자산이라 기본 포함. 빼려면 `--sp500-only`.
 
 ## 실행 (로컬 수동 실행도 동일)
