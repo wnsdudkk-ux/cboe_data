@@ -54,8 +54,13 @@ python -m unittest discover -s tests                      # 단위테스트 (21�
   상태를 커밋하면 안 되며(영영 재수집 안 됨), **성공률 90% 미만이면 아카이브를
   만들지 않는다**.
 - **403의 두 얼굴**: CBOE는 '없는 심볼'에 404가 아니라 403을 준다(실측: NVR 등)
-  → no_data로 분류. 반면 클라우드 샌드박스의 도메인 차단도 403인데 이때는
-  `x-deny-reason` 헤더가 붙는다 → 환경설정 오류로 즉시 실패 처리.
+  → no_data로 분류. 반면 클라우드 샌드박스의 도메인 차단도 403이다: `x-deny-reason`
+  헤더가 붙은 403이거나, 프록시가 CONNECT 자체를 거부(`Tunnel connection failed: 403`)
+  한다 → 막힌 호스트 이름을 담아 `ERROR:`로 즉시 실패(수 초). 단 이미 성공한 티커가
+  있으면 호스트는 허용된 것이므로 일시 장애로 보고 계속한다.
+- **CBOE 호스트 이전(2026-09)**: `cdn.cboe.com/api/...`가 전부 `cdn-api.cboe.com`으로
+  307 리다이렉트되기 시작했다. 허용 도메인에 `cdn.cboe.com`만 있던 루틴이 이 때문에
+  09-24·09-25분 수집에 실패했고, 이후 `CBOE_URL`을 `cdn-api.cboe.com`으로 바꿨다.
 - **OSI 옵션심볼은 꼬리 고정폭으로 파싱**: `[뿌리(가변)][YYMMDD][C/P][행사가*1000, 8자리]`.
   뿌리가 BRK.B, AAPL1처럼 가변이라 앞에서 자르면 깨진다.
 - **429 레이트리밋**: Retry-After 헤더 존중(상한 120초), 연속 실패 5회면 60초 냉각.
@@ -64,8 +69,9 @@ python -m unittest discover -s tests                      # 단위테스트 (21�
 ## 클라우드 루틴 설정 (claude.ai/code/routines)
 
 - 스케줄: 매일 07:30 KST (= 미 동부 전일 18:30, 장 마감 후)
-- 환경: Network access **Custom** + Allowed domains에 `cdn.cboe.com`,
-  `raw.githubusercontent.com` (+기본 패키지 목록 포함 체크)
+- 환경: Network access **Custom** + Allowed domains에 `cdn-api.cboe.com`,
+  `cdn.cboe.com`, `raw.githubusercontent.com` (+기본 패키지 목록 포함 체크).
+  `cdn-api.cboe.com`이 빠지면 `ERROR: 환경 네트워크 차단(...)`으로 끝난다.
 - 환경 Setup script: `pip install -r requirements.txt` (실행 간 캐시됨)
 - 레포 권한: Claude GitHub App에 이 레포 접근 허용 + 루틴 Permissions에서
   "Allow unrestricted branch pushes" ON (main에 커밋하므로)

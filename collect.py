@@ -18,7 +18,9 @@ claude.ai 클라우드 루틴(매일 07:30 KST)이 실행하는 스크립트이�
   만들지 않고 실패(exit 1)로 끝낸다. 반쪽짜리 데이터가 커밋되면 멱등성 때문에
   그 날짜가 영영 재수집되지 않는 문제를 막는다.
 - 403 구분: CBOE는 '없는 심볼'에 403을 준다(실측) -> no_data로 분류.
-  단 x-deny-reason 헤더가 있는 403은 샌드박스 이그레스 차단이므로 즉시 오류.
+  단 샌드박스 이그레스 차단(x-deny-reason 헤더가 붙은 403, 또는 프록시가 CONNECT를
+  403으로 거부 = URLError 'Tunnel connection failed: 403')은 환경설정 오류이므로,
+  아직 성공이 하나도 없으면 막힌 호스트 이름과 함께 즉시 중단한다.
 - 원자적 쓰기: 아카이브는 .tmp에 만든 뒤 os.replace()로 교체한다.
 - 점 티커: CBOE는 클래스주를 점 표기(BRK.B, BF.B) 그대로 받는다(실측 검증).
   옵션 심볼(OSI)은 뿌리 길이가 가변이므로 반드시 꼬리 고정폭으로 파싱한다.
@@ -55,7 +57,9 @@ DEFAULT_OUT_DIR = os.path.join(BASE_DIR, "data", "daily")
 FALLBACK_TICKER_FILE = os.path.join(BASE_DIR, "sp500_fallback.txt")
 CONSTITUENTS_URL = ("https://raw.githubusercontent.com/datasets/"
                     "s-and-p-500-companies/main/data/constituents.csv")
-CBOE_URL = "https://cdn.cboe.com/api/global/delayed_quotes/options/{sym}.json"
+# 2026-09 부터 cdn.cboe.com/api/... 는 전부 cdn-api.cboe.com 으로 307 리다이렉트된다(실측).
+# 리다이렉트 목적지를 직접 호출하며, 클라우드 환경 허용 도메인에 cdn-api.cboe.com 이 필요하다.
+CBOE_URL = "https://cdn-api.cboe.com/api/global/delayed_quotes/options/{sym}.json"
 UA_HEADERS = {"User-Agent": "cboe-data-collector/1.0"}
 
 # 세션 실제 마감시각(조기폐장이면 13:00 등) 이후 스냅샷 반영 여유(분).
@@ -89,8 +93,8 @@ class NoDataError(Exception):
 
 
 class EgressBlockedError(RuntimeError):
-    """클라우드 샌드박스가 도메인을 차단(403 + x-deny-reason). 환경설정 문제이므로
-    한 번이라도 걸리면 티커별로 계속 시도하지 않고 전체 수집을 즉시 중단한다."""
+    """클라우드 샌드박스가 도메인을 차단(403 + x-deny-reason, 또는 프록시 CONNECT 403).
+    환경설정 문제이므로 성공이 하나도 없는 상태에서 걸리면 전체 수집을 즉시 중단한다."""
 
 
 class SystemicFailureError(RuntimeError):
@@ -226,18 +230,40 @@ def rows_from(data, ticker):
 # HTTP — 재시도·429 Retry-After 존중·404는 NoData
 # ---------------------------------------------------------------------------
 
+def _final_host(req):
+    """요청이 실제로 도달하려던 호스트. urllib은 따라간 리다이렉트 체인을
+    req.redirect_dict에 순서대로 기록하므로, 있으면 마지막 목적지를 쓴다."""
+    chain = list(getattr(req, "redirect_dict", None) or ())
+    return urllib.parse.urlsplit(chain[-1] if chain else req.full_url).hostname
+
+
+def _egress_blocked(host, detail):
+    return EgressBlockedError(
+        f"환경 네트워크 차단({detail}): 클라우드 환경 Network access의 "
+        f"Allowed domains에 {host} 를 추가해야 한다")
+
+
+def _is_proxy_connect_403(err):
+    """프록시가 CONNECT를 403으로 거부했는지. urllib은 이를 HTTPError가 아니라
+    URLError(OSError('Tunnel connection failed: 403 Forbidden'))로 올린다."""
+    return (isinstance(err, urllib.error.URLError)
+            and not isinstance(err, urllib.error.HTTPError)
+            and str(err.reason).startswith("Tunnel connection failed: 403"))
+
+
 def fetch_json(url, max_retries=2, _sleep=time.sleep):
     """URL에서 JSON을 받는다. max_retries=0이어도 최초 1회는 반드시 시도한다.
 
     - 404: 옵션 미상장으로 보고 즉시 NoDataError (재시도 없음)
     - 429: Retry-After 헤더를 존중(상한 RETRY_AFTER_CAP_SEC), 없으면 지수 백오프
     - 그 외 오류: 지수 백오프 후 재시도, 소진 시 마지막 예외를 올린다
+      (재시도를 다 써도 프록시 CONNECT 403이면 EgressBlockedError)
     """
     attempts = max(1, int(max_retries) + 1)
     last_err = None
     for i in range(attempts):
+        req = urllib.request.Request(url, headers=UA_HEADERS)
         try:
-            req = urllib.request.Request(url, headers=UA_HEADERS)
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read())
         except urllib.error.HTTPError as e:
@@ -248,9 +274,8 @@ def fetch_json(url, max_retries=2, _sleep=time.sleep):
                 # 단, 클라우드 샌드박스의 이그레스 차단도 403이므로(x-deny-reason
                 # 헤더 존재) 그 경우는 환경설정 오류로 즉시 구분해 올린다.
                 if e.headers and e.headers.get("x-deny-reason"):
-                    raise EgressBlockedError(
-                        f"환경 네트워크 차단(x-deny-reason={e.headers['x-deny-reason']}): "
-                        "클라우드 환경의 허용 도메인에 cdn.cboe.com 을 추가해야 한다")
+                    raise _egress_blocked(
+                        _final_host(req), f"x-deny-reason={e.headers['x-deny-reason']}")
                 raise NoDataError(url)
             last_err = e
             if i + 1 >= attempts:
@@ -269,6 +294,8 @@ def fetch_json(url, max_retries=2, _sleep=time.sleep):
             if i + 1 >= attempts:
                 break
             _sleep(min(2 ** (i + 1), 30))
+    if _is_proxy_connect_403(last_err):
+        raise _egress_blocked(_final_host(req), "프록시 CONNECT 403") from last_err
     raise last_err
 
 
@@ -297,9 +324,11 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2):
         except NoDataError:
             no_data.append(t)  # 옵션 미상장(404/403)은 정상 분류
             streak = 0
-        except EgressBlockedError:
-            raise  # 환경 차단은 티커별로 계속하지 않고 전체 즉시 중단
         except Exception as e:
+            # 환경 차단은 전체 즉시 중단. 단 이미 성공이 있으면 호스트가 허용돼 있다는
+            # 뜻이므로(프록시 403은 일시 장애일 수도 있음) 일반 실패로 세고 계속한다.
+            if isinstance(e, EgressBlockedError) and not ok:
+                raise
             failed.append((t, str(e)[:120]))
             streak += 1
             logger.warning(f"실패 {t}: {e}")

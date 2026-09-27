@@ -97,8 +97,45 @@ class TestFetch(unittest.TestCase):
         # 샌드박스 이그레스 차단(403 + x-deny-reason)은 환경설정 오류로 즉시 실패
         with mock.patch.object(collect.urllib.request, "urlopen",
                                side_effect=http_error(403, {"x-deny-reason": "host_not_allowed"})):
-            with self.assertRaisesRegex(RuntimeError, "cdn.cboe.com"):
-                collect.fetch_json("http://x", max_retries=3, _sleep=lambda s: None)
+            with self.assertRaisesRegex(collect.EgressBlockedError, r"cdn-api\.cboe\.com"):
+                collect.fetch_json(collect.CBOE_URL.format(sym="AAPL"), max_retries=3,
+                                   _sleep=lambda s: None)
+
+    def test_proxy_connect_403_is_egress_block(self):
+        # 2026-09 장애 재현: 프록시가 CONNECT를 403으로 거부하면 urllib은 HTTPError가
+        # 아닌 URLError를 올린다. 재시도 후에도 같으면 막힌 호스트를 짚어 즉시 실패.
+        calls = []
+
+        def fake(*a, **k):
+            calls.append(1)
+            raise urllib.error.URLError(OSError("Tunnel connection failed: 403 Forbidden"))
+
+        with mock.patch.object(collect.urllib.request, "urlopen", side_effect=fake):
+            with self.assertRaisesRegex(collect.EgressBlockedError, r"cdn-api\.cboe\.com"):
+                collect.fetch_json(collect.CBOE_URL.format(sym="AAPL"), max_retries=2,
+                                   _sleep=lambda s: None)
+        self.assertEqual(len(calls), 3)  # 일시 장애일 수 있으니 재시도는 다 쓴다
+
+    def test_proxy_connect_403_names_redirect_target(self):
+        # 실제 원인: cdn.cboe.com -> cdn-api.cboe.com 307 리다이렉트 후 목적지가 막힘.
+        # 요청 URL이 아니라 리다이렉트 목적지(= 허용 목록에 추가할 호스트)를 알려야 한다.
+        def fake(req, *a, **k):
+            req.redirect_dict = {"https://cdn-api.cboe.com/api/x.json": 1}
+            raise urllib.error.URLError(OSError("Tunnel connection failed: 403 Forbidden"))
+
+        with mock.patch.object(collect.urllib.request, "urlopen", side_effect=fake):
+            with self.assertRaises(collect.EgressBlockedError) as cm:
+                collect.fetch_json("https://cdn.cboe.com/api/x.json", max_retries=0,
+                                   _sleep=lambda s: None)
+        self.assertIn("cdn-api.cboe.com 를 추가", str(cm.exception))
+
+    def test_other_tunnel_failure_stays_plain_error(self):
+        # 403이 아닌 터널 실패(502 등)는 차단이 아니라 일반 장애 -> 원래 예외 그대로
+        err = urllib.error.URLError(OSError("Tunnel connection failed: 502 Bad Gateway"))
+        with mock.patch.object(collect.urllib.request, "urlopen", side_effect=err):
+            with self.assertRaises(urllib.error.URLError) as cm:
+                collect.fetch_json("http://x", max_retries=0, _sleep=lambda s: None)
+        self.assertNotIsInstance(cm.exception, collect.EgressBlockedError)
 
     def test_429_respects_retry_after_capped(self):
         sleeps = []
@@ -222,6 +259,30 @@ class TestReviewFixes(unittest.TestCase):
                                    side_effect=collect.EgressBlockedError("blocked")):
                 with self.assertRaises(collect.EgressBlockedError):
                     collect.collect(["AAPL", "MSFT"], "20260702", td, sleep=0)
+
+    def test_egress_block_after_success_is_counted_not_fatal(self):
+        # 이미 받아온 적이 있으면 호스트는 허용된 것 -> 일시적 프록시 403으로 그날
+        # 수집분 전체를 버리지 않고 일반 실패로 센다
+        opt = {"data": {"options": [{"option": "AAPL261218C00150000"}]}}
+        with tempfile.TemporaryDirectory() as td:
+            with mock.patch.object(collect, "fetch_json",
+                                   side_effect=[opt, collect.EgressBlockedError("blocked")]):
+                ok, no_data, failed = collect.collect(["AAPL", "MSFT"], "20260702", td, sleep=0)
+        self.assertEqual((ok, no_data, [t for t, _ in failed]), (["AAPL"], [], ["MSFT"]))
+
+    def test_egress_block_reports_error_fast_via_main(self):
+        # 루틴 출력 규약: 차단이면 'ERROR:' + 추가할 호스트, exit 1, 아카이브 없음
+        with tempfile.TemporaryDirectory() as td:
+            err = collect.EgressBlockedError("Allowed domains에 cdn-api.cboe.com 를 추가해야 한다")
+            buf = io.StringIO()
+            with mock.patch.object(collect, "fetch_json", side_effect=err) as mfetch, \
+                 mock.patch("sys.stdout", buf):
+                rc = collect.main(["--tickers", "SPX", "AAPL", "--out-dir", td, "--sleep", "0"])
+            self.assertEqual(rc, 1)
+            self.assertEqual(mfetch.call_count, 1)  # 첫 티커에서 바로 중단
+            self.assertIn("ERROR:", buf.getvalue())
+            self.assertIn("cdn-api.cboe.com", buf.getvalue())
+            self.assertEqual([f for f in os.listdir(td) if f.endswith(".tar.gz")], [])
 
     def test_systemic_failure_aborts_early(self):
         # 40개 전부 실패해도 30개째에서 계통 장애로 중단(전부 갈아넣지 않음)
