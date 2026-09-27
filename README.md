@@ -39,7 +39,7 @@ pip install -r requirements.txt
 python collect.py                # 이미 오늘치가 있으면 'exists' 출력 후 종료
 python collect.py --force        # 재수집
 python collect.py --tickers BRK.B NVR --out-dir /tmp/t   # 테스트
-python -m unittest discover -s tests                      # 단위테스트 (21개)
+python -m unittest discover -s tests                      # 단위테스트 (35개)
 ```
 
 출력 규약: `OK:`(성공) / `exists:`(할 일 없음) / `ERROR:`(성공률 미달 — 아카이브

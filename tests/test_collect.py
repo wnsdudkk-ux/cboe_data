@@ -129,6 +129,17 @@ class TestFetch(unittest.TestCase):
                                    _sleep=lambda s: None)
         self.assertIn("cdn-api.cboe.com 를 추가", str(cm.exception))
 
+    def test_deny_reason_names_redirect_target(self):
+        def fake(req, *a, **k):
+            req.redirect_dict = {"https://cdn-api.cboe.com/api/x.json": 1}
+            raise http_error(403, {"x-deny-reason": "host_not_allowed"})
+
+        with mock.patch.object(collect.urllib.request, "urlopen", side_effect=fake):
+            with self.assertRaises(collect.EgressBlockedError) as cm:
+                collect.fetch_json("https://cdn.cboe.com/api/x.json", max_retries=0,
+                                   _sleep=lambda s: None)
+        self.assertIn("cdn-api.cboe.com 를 추가", str(cm.exception))
+
     def test_other_tunnel_failure_stays_plain_error(self):
         # 403이 아닌 터널 실패(502 등)는 차단이 아니라 일반 장애 -> 원래 예외 그대로
         err = urllib.error.URLError(OSError("Tunnel connection failed: 502 Bad Gateway"))
