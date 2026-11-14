@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""gex.py - 보관본의 옵션 호가·미결제약정으로 딜러 감마 노출(GEX)을 계산하고 종목마다 그림 두 장을 만든다(기본 종목: SPX).
+"""gex.py - 보관본의 SPX 옵션 호가·미결제약정으로 딜러 감마 노출(GEX)을 계산하고 그림 두 장을 만든다.
 
 그림 1(--png)         그날 마감 기준: 가격 차트, 행사가별 GEX, 가격별 GEX 프로필을 가로로 나란히 놓고 세로축(지수 수준)을 함께 쓴다.
                       콜 벽·감마 플립·종가·풋 벽은 세 그림에 걸쳐 긋는다(가로 2160픽셀)
-그림 2(--png-history) 추이: 종가와 감마 플립, 순 GEX(콜·풋 합계 대비 %)
+그림 2(--png-history) 추이: S&P 500 종가와 감마 플립, 순 GEX(콜·풋 합계 대비 %)
 
 예:   python3 gex.py --archive-dir data/daily --history-csv data/daily/gex_history.csv --closes-csv data/daily/index_closes.csv \
                      --png gex.png --png-history gex_history.png
       python3 gex.py --archive-dir data/daily --date 20261113 --png gex.png --out-json gex.json
-      python3 gex.py --archive-dir data/daily --tickers SPX GLD QQQ --lookback 20 --png gex.png --png-history gex_history.png
 필요: pandas, numpy (선택: matplotlib 그림, yfinance 종가·일봉, exchange_calendars 조기 폐장일)
 
 추이 표(data/daily/gex_history.csv)는 수집기(collect.py)가 수집을 마칠 때마다 이 스크립트를 띄워 그날 줄을 넣는다
@@ -31,18 +30,6 @@
 - 감마 플립: 프로필이 0을 지나는 지수 수준. 여러 곳이면 종가에 가장 가까운 것. 종가 ±20% 안에서 찾고, 없으면 비워 둔다.
 - 콜 벽·풋 벽: 종가 위쪽에서 콜 GEX가 가장 큰 행사가, 아래쪽에서 풋 GEX가 가장 큰 행사가(전체 만기, 잔존 30일 이내 두 가지).
 - 미결제약정은 파일에 든 값(전 영업일 마감 기준)이다. 당일 만기 계약은 뺀다(마감 시점에는 이미 끝났다).
-- 여러 종목(--tickers): 보관본에 있는 종목이면 지수·ETF·개별 주식 모두 같은 방법으로 계산한다. 종목마다 달라지는 것은 아래뿐이다.
-  · 저장 경로: SPX는 준 경로 그대로, 다른 종목은 확장자 앞에 _종목 을 붙인다(gex.png -> gex_gld.png, gex_history.csv -> gex_history_gld.csv).
-    경로에 {t}를 넣으면 그 자리에 종목(소문자)이 들어간다. 추이 표도 종목마다 따로 둔다.
-  · 종가·일봉: 야후 파이낸스에서 받는다(SPX는 수집기가 적어 둔 종가 표도 쓴다). 종가가 옵션 호가에 담긴 수준과 5% 넘게 다르면
-    (액면분할 직후 등) 종가를 버리고 옵션 호가의 수준에서 계산한다.
-  · 금액 단위: SPX는 십억 달러(bn). 다른 종목은 콜·풋 합계가 50억 달러 이상이면 십억 달러, 그보다 작으면 백만 달러(mn)로 적는다.
-    추이 표의 금액 열은 항상 십억 달러다.
-  · 행사가 묶음 폭: SPX는 25, 다른 종목은 가격의 1/300에 가까운 깔끔한 수(종가 근처 행사가 간격보다 좁아지지는 않는다).
-  · 호가 시점: 지수와 일부 ETF(SPY·QQQ·IWM·DIA) 옵션은 16:15, 나머지는 16:00 마감으로 본다(잔존 기간 계산에만 쓰이고 영향은 작다).
-  · 개별 주식·ETF 옵션은 만기 전에도 행사할 수 있고 배당이 있어 선도가·IV가 근사치다. 딜러가 콜을 사 두고 풋을 팔아 둔 상태라는
-    가정은 지수에서 쓰는 관행이라 종목에 따라 맞지 않을 수 있다(콜 매수가 많은 종목은 부호가 반대일 수 있다).
-  · VIX: 만기마다 기초자산이 그 만기의 VIX 선물이라 현물 종가를 쓰지 않고 근월 선물 수준에서 계산하며, 딜러 가정이 맞지 않아 참고용이다.
 - ilovevol.app의 공개 수치와 대조(2026-11-13, 십억 달러): 종가 수준의 순 GEX -39.5(그 사이트 프로필 그림 약 -39), 감마 플립 7,618(7,617 근처),
   호가 시점의 값 -49.5(추이 화면 -49.3), Cboe 감마로 낸 값 -54.2(일일 리뷰 -54.2), 잔존 30일 이내 콜 벽·풋 벽 7,700·7,500(같음).
 """
@@ -55,73 +42,17 @@ import sys
 import numpy as np
 import pandas as pd
 
-from option_sentiment import AM_ROOTS, INDEX, R, YF, implied_vol, list_dates, load_day
+from option_sentiment import AM_ROOTS, R, implied_vol, list_dates, load_day
 from vix_decomp import index_closes, quote_time
 
 M365 = 525600.0                # 365일의 분 수
 SQ2PI = math.sqrt(2 * math.pi)
 SPAN = 0.20                    # 프로필과 감마 플립을 계산하는 범위(현재 지수의 ±20%)
 STEP = 0.0025                  # 프로필 격자 간격(지수의 0.25%)
-BUCKET = 25.0                  # 행사가별 그림에서 한 막대로 묶는 행사가 폭(SPX)
-BUCKETS = {"SPX": BUCKET}      # 묶음 폭을 정해 둔 종목. 나머지는 bucket_of()가 가격에 맞춰 고른다
-NAMES = {"SPX": "S&P 500", "NDX": "Nasdaq 100", "RUT": "Russell 2000"}   # 그림에 적는 기초자산 이름(없으면 종목 기호)
-LATE_CLOSE = INDEX | {"SPY", "QQQ", "IWM", "DIA"}                         # 옵션이 16:15까지 거래되는 종목(나머지는 16:00)
-FUT_BASED = {"VIX"}            # 만기마다 기초자산이 선물인 종목: 현물 종가를 쓰지 않는다
-UNITS = {"bn": (1e9, "B", "십억 달러", "$bn"), "mn": (1e6, "M", "백만 달러", "$mn")}   # 금액 단위: (나누는 수, 그림의 접미사, 한글, 영문)
-UNIT_SWITCH = 5e9              # 콜·풋 합계가 이보다 작으면 백만 달러로 적는다
-SPLIT_GAP = 0.05               # 종가가 옵션 호가에 담긴 수준과 이보다 크게 다르면(액면분할 등) 종가를 쓰지 않는다
+BUCKET = 25.0                  # 행사가별 그림에서 한 막대로 묶는 행사가 폭
 HIST_COLS = ["date", "spot", "ref", "net_bn", "net7_bn", "net30_bn", "gross_bn", "pct", "flip", "call_wall", "put_wall",
              "call_wall30", "put_wall30", "net_quote_bn", "net_cboe_bn"]
 NAN = float("nan")
-
-
-# ----------------------------------------------------------------------------- 종목별 설정
-def quote_tv(ticker, date):
-    """호가 시점(미 동부). 지수와 LATE_CLOSE의 ETF 옵션은 주식시장 마감 + 15분, 나머지는 주식시장 마감."""
-    tv = quote_time(date)
-    return tv if ticker in LATE_CLOSE else tv - pd.Timedelta(minutes=15).to_pytimedelta()
-
-
-def bucket_of(ticker, spot, strikes=None):
-    """행사가별 그림에서 한 막대로 묶는 폭. 정해 둔 종목은 그 값, 나머지는 가격의 1/300에 가까운 깔끔한 수.
-    종가 ±10% 안의 행사가 간격(중앙값)보다 좁아지지는 않는다."""
-    if ticker in BUCKETS:
-        return BUCKETS[ticker]
-    if not (spot == spot and spot > 0):
-        return BUCKET
-    target = spot / 300
-    mag = 10 ** math.floor(math.log10(target))
-    b = min((s * mag for s in (1, 2.5, 5, 10)), key=lambda v: abs(math.log(v / target)))
-    if strikes is not None:
-        k = np.unique(np.asarray(strikes, float))
-        k = k[(k > spot * 0.9) & (k < spot * 1.1)]
-        if len(k) >= 2:
-            b = max(b, float(np.median(np.diff(k))))
-    return float(b)
-
-
-def digits(spot):
-    """수준(플립, 눈금 등)을 적을 때의 소수 자릿수: 1,000 이상 0, 100 이상 1, 그 아래 2."""
-    return 0 if not spot == spot or spot >= 1000 else 1 if spot >= 100 else 2
-
-
-def unit_of(gross, ticker="SPX"):
-    """금액 단위. SPX는 항상 십억 달러(추이 표·보고 형식을 그대로 둔다), 다른 종목은 콜·풋 합계의 크기로 고른다."""
-    return "bn" if ticker == "SPX" or not gross == gross or gross >= UNIT_SWITCH else "mn"
-
-
-def out_path(path, ticker):
-    """종목별 저장 경로. {t}가 있으면 그 자리에 종목(소문자), 없으면 SPX는 그대로 두고 다른 종목은 확장자 앞에 _종목 을 붙인다.
-    ticker가 None이면 그대로 돌려준다."""
-    if not path or ticker is None:
-        return path
-    low = ticker.lower().replace(".", "")
-    if "{t}" in path:
-        return path.replace("{t}", low)
-    if ticker == "SPX":
-        return path
-    root, ext = os.path.splitext(path)
-    return f"{root}_{low}{ext}"
 
 
 # ----------------------------------------------------------------------------- 만기별 모형
@@ -162,10 +93,10 @@ def expiry_model(g, exp, root, tv):
     return {"F": F, "T": T, "k": k[ok], "v": v[ok]}
 
 
-def build(df, date, ticker="SPX"):
+def build(df, date):
     """잔존 1일 이상인 계약을 (만기, 루트, 행사가)별 한 줄로 모으고 선도가 F, 잔존 기간 T, IV(sig)를 붙인다.
     돌려주는 것: (표, 모형을 만들지 못해 뺀 계약의 미결제약정 비중)."""
-    tv = quote_tv(ticker, date)
+    tv = quote_time(date)
     live = df[df["dte"] >= 1]
     if live.empty:
         return None, NAN
@@ -249,12 +180,12 @@ def walls(t, u, spot):
 
 
 # ----------------------------------------------------------------------------- 하루치
-def day(df, date, spot=NAN, ticker="SPX"):
-    """하루치 옵션 호가로 순 GEX, 행사가별 GEX, 가격별 프로필, 감마 플립, 콜 벽·풋 벽을 계산한다. spot = 공식 종가(없으면 호가에 담긴
+def day(df, date, spot=NAN):
+    """하루치 SPX 호가로 순 GEX, 행사가별 GEX, 가격별 프로필, 감마 플립, 콜 벽·풋 벽을 계산한다. spot = 공식 종가(없으면 호가에 담긴
     지수 수준을 쓴다). 못 하면 {"error": 이유}."""
-    t, miss = build(df, date, ticker)
+    t, miss = build(df, date)
     if t is None or not len(t):
-        return {"date": date, "ticker": ticker, "error": f"잔존 1일 이상인 {ticker} 옵션의 호가가 없음"}
+        return {"date": date, "error": "잔존 1일 이상인 SPX 옵션의 호가가 없음"}
     b = Book(t)
     ref = ref_level(t)
     if not (spot == spot and spot > 0):
@@ -271,7 +202,6 @@ def day(df, date, spot=NAN, ticker="SPX"):
     ks = ks[(ks["K"] >= spot * (1 - SPAN)) & (ks["K"] <= spot * (1 + SPAN))].groupby("K").sum()
     lo, hi = int(np.argmin(y)), int(np.argmax(y))
     return {
-        "ticker": ticker, "bucket": bucket_of(ticker, spot, t["K"].values), "unit": unit_of(gross, ticker),
         "date": date, "spot": float(spot), "ref": ref, "net": net, "net7": float((gc - gp)[w7].sum()), "net30": float((gc - gp)[w30].sum()),
         "call": float(gc.sum()), "put": float(gp.sum()), "gross": gross, "pct": 100 * net / gross if gross > 0 else NAN,
         "net_quote": b.net(1.0), "net_cboe": float(spot * spot * (t["cb_c"] - t["cb_p"]).sum()),
@@ -288,13 +218,11 @@ def hist_row(r):
     """day() 결과에서 추이 표 한 줄(금액은 십억 달러)."""
     if "error" in r:
         return None
-    a = 3 if r.get("unit", "bn") == "bn" else 6                             # 금액이 작은 종목은 자릿수를 더 둔다(십억 달러 기준)
-    lv = 2 if r["spot"] >= 100 else 4
-    return {"date": r["date"], "spot": round(r["spot"], lv), "ref": round(r["ref"], lv), "net_bn": round(r["net"] / 1e9, a),
-            "net7_bn": round(r["net7"] / 1e9, a), "net30_bn": round(r["net30"] / 1e9, a), "gross_bn": round(r["gross"] / 1e9, a - 1),
-            "pct": round(r["pct"], 3), "flip": round(r["flip"], 1 if r["spot"] >= 1000 else 3) if r["flip"] == r["flip"] else NAN,
+    return {"date": r["date"], "spot": round(r["spot"], 2), "ref": round(r["ref"], 2), "net_bn": round(r["net"] / 1e9, 3),
+            "net7_bn": round(r["net7"] / 1e9, 3), "net30_bn": round(r["net30"] / 1e9, 3), "gross_bn": round(r["gross"] / 1e9, 2),
+            "pct": round(r["pct"], 3), "flip": round(r["flip"], 1) if r["flip"] == r["flip"] else NAN,
             "call_wall": r["walls"]["call"], "put_wall": r["walls"]["put"], "call_wall30": r["walls30"]["call"], "put_wall30": r["walls30"]["put"],
-            "net_quote_bn": round(r["net_quote"] / 1e9, a), "net_cboe_bn": round(r["net_cboe"] / 1e9, a)}
+            "net_quote_bn": round(r["net_quote"] / 1e9, 3), "net_cboe_bn": round(r["net_cboe"] / 1e9, 3)}
 
 
 def read_history(path):
@@ -328,11 +256,11 @@ def save_history(hist, path):
 
 
 # ----------------------------------------------------------------------------- 지수 종가·일봉
-def read_closes(path, ticker="SPX"):
-    """수집기가 적어 둔 지수 종가 표(date, spx, vix, ...)에서 {날짜: 그 종목의 종가}. 표나 그 종목의 열이 없으면 빈 값."""
+def read_closes(path):
+    """수집기가 적어 둔 지수 종가 표(date, spx, ...)에서 {날짜: S&P 500 종가}. 없거나 읽지 못하면 빈 값."""
     try:
         c = pd.read_csv(path, dtype={"date": str})
-        v = pd.to_numeric(c[ticker.lower()], errors="coerce")
+        v = pd.to_numeric(c["spx"], errors="coerce")
         return {d: float(x) for d, x in zip(c["date"], v) if x == x and x > 0}
     except Exception:
         return {}
@@ -347,36 +275,12 @@ def pick_close(yahoo, saved):
     return b, NAN
 
 
-def yahoo_closes(sym, dates):
-    """야후 파이낸스의 종가 {날짜: 종가}. 받지 못하면 빈 값(옵션 호가에 담긴 수준으로 계산을 계속한다)."""
-    try:
-        import yfinance as yf
-        a, b = pd.Timestamp(min(dates)), pd.Timestamp(max(dates))
-        px = yf.download(sym, start=a - pd.Timedelta(days=3), end=b + pd.Timedelta(days=1), auto_adjust=False, progress=False)
-        if isinstance(px.columns, pd.MultiIndex):
-            px.columns = px.columns.get_level_values(0)
-        c = px["Close"].dropna()
-        c.index = pd.to_datetime(c.index).tz_localize(None).normalize()
-        return {d: float(c.loc[pd.Timestamp(d)]) for d in dates if pd.Timestamp(d) in c.index}
-    except Exception:
-        return {}
-
-
-def closes_for(ticker, dates):
-    """계산에 쓸 종가 {날짜: 종가}. SPX는 vix_decomp와 같은 경로로 받고, 선물이 기초자산인 종목은 받지 않는다."""
-    if ticker in FUT_BASED or not dates:
-        return {}
-    if ticker == "SPX":
-        return {d: v["spx"] for d, v in index_closes(dates).items() if "spx" in v}
-    return yahoo_closes(YF.get(ticker, ticker.replace(".", "-")), dates)
-
-
-def ohlc(end, n=320, sym="^GSPC"):
-    """야후 파이낸스의 일봉(end까지 최대 n개. 기본은 S&P 500). 받지 못하면 None(가격 차트만 빠진다)."""
+def ohlc(end, n=320):
+    """야후 파이낸스의 S&P 500 일봉(end까지 최대 n개). 받지 못하면 None(가격 차트만 빠진다)."""
     try:
         import yfinance as yf
         e = pd.Timestamp(end)
-        px = yf.download(sym, start=e - pd.Timedelta(days=int(n * 1.6) + 10), end=e + pd.Timedelta(days=1), auto_adjust=False, progress=False)
+        px = yf.download("^GSPC", start=e - pd.Timedelta(days=int(n * 1.6) + 10), end=e + pd.Timedelta(days=1), auto_adjust=False, progress=False)
         if isinstance(px.columns, pd.MultiIndex):
             px.columns = px.columns.get_level_values(0)
         px.index = pd.to_datetime(px.index).tz_localize(None).normalize()
@@ -396,10 +300,8 @@ def summary(r, hist, bars=None):
     if "error" in r:
         return {"date": r.get("date"), "error": r["error"]}
     h = hist[hist["date"] <= r["date"]].reset_index(drop=True)
-    c = _ctx(r)
-    out = {"ticker": c["t"], "unit": c["unit"], "bucket": r.get("bucket", BUCKET)}
-    out.update({k: r[k] for k in ("date", "spot", "ref", "net", "net7", "net30", "call", "put", "gross", "pct", "net_quote", "net_cboe", "flip",
-                             "flip30", "walls", "walls30", "walls7", "low", "high", "n", "n_exp", "miss")})
+    out = {k: r[k] for k in ("date", "spot", "ref", "net", "net7", "net30", "call", "put", "gross", "pct", "net_quote", "net_cboe", "flip",
+                             "flip30", "walls", "walls30", "walls7", "low", "high", "n", "n_exp", "miss")}
     out["strikes"], out["profile"] = r["strikes"], r["profile"]
     out["history"] = {c: h[c].tolist() for c in ("date", "spot", "net_bn", "gross_bn", "pct", "flip") if c in h}
     flags = []
@@ -423,15 +325,10 @@ def summary(r, hist, bars=None):
     if r["miss"] == r["miss"] and r["miss"] > 0.03:
         flags.append(f"호가가 부족해 계산에서 뺀 만기의 미결제약정 비중 {r['miss']:.1%}")
     if abs(r["ref"] / r["spot"] - 1) > 0.003:
-        why = ("장 마감 뒤 15분 사이에 시장이 움직였거나 호가 파일이 마감 시점 것이 아닐 수 있음" if c["index"] else
-               "장 마감 뒤에 가격이 움직였거나, 배당·대차 비용이 선도가에 섞였거나, 호가 파일이 마감 시점 것이 아닐 수 있음")
-        flags.append(f"옵션 호가에 담긴 {c['u']} 수준({r['ref']:,.{1 if c['nd'] == 0 else 2}f})이 종가({r['spot']:,.2f})와 "
-                     f"{100 * (r['ref'] / r['spot'] - 1):+.2f}% 다름. {why}")
+        flags.append(f"옵션 호가에 담긴 지수 수준({r['ref']:,.1f})이 종가({r['spot']:,.2f})와 {100 * (r['ref'] / r['spot'] - 1):+.2f}% 다름. "
+                     "장 마감 뒤 15분 사이에 시장이 움직였거나 호가 파일이 마감 시점 것이 아닐 수 있음")
     if not r["flip"] == r["flip"]:
         flags.append("종가 ±20% 안에 감마 플립이 없음(프로필이 한쪽 부호뿐임)")
-    if c["t"] in FUT_BASED:
-        flags.append(f"{c['t']} 옵션은 만기마다 기초자산이 그 만기의 선물이라 현물 종가 대신 근월 선물 수준에서 계산했고, "
-                     "딜러가 콜을 사 두고 풋을 팔아 둔 상태라는 가정이 맞지 않아 참고용임")
     out["flags"] = flags
     return out
 
@@ -456,54 +353,36 @@ def _ymd(d):
     return f"{d[:4]}-{d[4:6]}-{d[6:]}"
 
 
-def _ctx(res):
-    """글 보고와 그림에 쓰는 종목별 표기: 종목, 기초자산 이름, '지수'/'주가', 수준의 소수 자릿수, 금액 단위."""
-    t = res.get("ticker") or "SPX"
-    code = res.get("unit") or "bn"
-    spot = res.get("spot")
-    return {"t": t, "name": NAMES.get(t, t), "index": t in INDEX, "u": "지수" if t in INDEX else "주가",
-            "nd": digits(NAN if spot is None else spot), "unit": code, "div": UNITS[code][0]}
+def _bn(x, n=1):
+    return f"{x / 1e9:+,.{n}f}"
 
 
-def _amt(x, c, n=1):
-    return f"{x / c['div']:+,.{n}f}"
-
-
-def _lv(x, nd=0):
-    """수준·행사가. 소수 nd자리까지 적되 끝의 0은 뗀다(7,700 / 352.4 / 22.5)."""
-    if x is None or x != x:
-        return "-"
-    s = f"{x:,.{nd}f}"
-    return s.rstrip("0").rstrip(".") if "." in s else s
+def _lv(x):
+    return "-" if x is None or x != x else f"{x:,.0f}"
 
 
 def report(res):
-    c = _ctx(res)
-    L = [f"\n== {c['t']} 감마 노출(GEX) | {res.get('date', '-')}"]
+    L = [f"\n== SPX 감마 노출(GEX) | {res.get('date', '-')}"]
     if "error" in res:
         return "\n".join(L + [f"  [확인 필요] {res['error']}"])
     p, st = res.get("prev"), res.get("stats")
-    U, u, nd, div = c["unit"], c["u"], c["nd"], c["div"]
-    L.append(f"  [순 GEX] {_amt(res['net'], c)}{U}({u} 1% 움직임당, 종가 {res['spot']:,.2f} 수준)" + (f" | 전일 {_amt(p['net'], c)}{U}" if p else "")
-             + f" | 콜 {res['call'] / div:,.1f}{U}, 풋 {res['put'] / div:,.1f}{U}, 합 {res['gross'] / div:,.1f}{U} 대비 {res['pct']:+.1f}%")
-    L.append(f"    만기별: 잔존 7일 이내 {_amt(res['net7'], c)} | 8~30일 {_amt(res['net30'] - res['net7'], c)} | 30일 초과 {_amt(res['net'] - res['net30'], c)}")
+    L.append(f"  [순 GEX] {_bn(res['net'])}bn(지수 1% 움직임당, 종가 {res['spot']:,.2f} 수준)" + (f" | 전일 {_bn(p['net'])}bn" if p else "")
+             + f" | 콜 {res['call'] / 1e9:,.1f}bn, 풋 {res['put'] / 1e9:,.1f}bn, 합 {res['gross'] / 1e9:,.1f}bn 대비 {res['pct']:+.1f}%")
+    L.append(f"    만기별: 잔존 7일 이내 {_bn(res['net7'])} | 8~30일 {_bn(res['net30'] - res['net7'])} | 30일 초과 {_bn(res['net'] - res['net30'])}")
     f = res["flip"]
     if f is not None and f == f:
         d = f - res["spot"]
-        L.append(f"  [감마 플립] {_lv(f, nd)} | 종가가 플립보다 {_lv(abs(d), nd)}({abs(d) / res['spot']:.2%}) {'아래 → 음의 감마 구간' if d > 0 else '위 → 양의 감마 구간'}"
-                 + (f" | 전일 플립 {_lv(p['flip'], nd)}" if p and p["flip"] == p["flip"] else "") + f" | 잔존 30일 이내만 보면 {_lv(res['flip30'], nd)}")
+        L.append(f"  [감마 플립] {f:,.0f} | 종가가 플립보다 {abs(d):,.0f}({abs(d) / res['spot']:.2%}) {'아래 → 음의 감마 구간' if d > 0 else '위 → 양의 감마 구간'}"
+                 + (f" | 전일 플립 {p['flip']:,.0f}" if p and p["flip"] == p["flip"] else "") + f" | 잔존 30일 이내만 보면 {_lv(res['flip30'])}")
     else:
         L.append(f"  [감마 플립] 종가 ±20% 안에 없음(순 GEX가 전 구간에서 {'양수' if res['net'] > 0 else '음수'})")
-    L.append(f"  [콜 벽·풋 벽] 잔존 30일 이내 {_lv(res['walls30']['call'], 2)} / {_lv(res['walls30']['put'], 2)} | 전체 만기 {_lv(res['walls']['call'], 2)} / {_lv(res['walls']['put'], 2)}"
-             f" | 잔존 7일 이내 {_lv(res['walls7']['call'], 2)} / {_lv(res['walls7']['put'], 2)}")
-    L.append(f"  [가격별 프로필] {u}가 {_lv(res['low']['price'], nd)}이면 {_amt(res['low']['net'], c)}{U}(가장 낮음), "
-             f"{_lv(res['high']['price'], nd)}이면 {_amt(res['high']['net'], c)}{U}(가장 높음)")
+    L.append(f"  [콜 벽·풋 벽] 잔존 30일 이내 {_lv(res['walls30']['call'])} / {_lv(res['walls30']['put'])} | 전체 만기 {_lv(res['walls']['call'])} / {_lv(res['walls']['put'])}"
+             f" | 잔존 7일 이내 {_lv(res['walls7']['call'])} / {_lv(res['walls7']['put'])}")
+    L.append(f"  [가격별 프로필] 지수가 {res['low']['price']:,.0f}이면 {_bn(res['low']['net'])}bn(가장 낮음), {res['high']['price']:,.0f}이면 {_bn(res['high']['net'])}bn(가장 높음)")
     if st:
         L.append(f"  [추이 {_ymd(st['first'])}~, {st['days']}일] 순 GEX가 음수인 날 {st['neg_days']}일({st['neg_days'] / st['days']:.0%})"
-                 f" | 오늘 값은 낮은 쪽에서 {st['rank_low']}번째 | {'음' if st['run_sign'] < 0 else '양'}의 감마 {st['run']}일째"
-                 f" | 중앙값 {st['median'] * 1e9 / div:+.1f}{U}")
-    L.append(f"  [계산 기준에 따른 차이] 옵션 마감 호가 시점 그대로({u} 환산 {res['ref']:,.{1 if nd == 0 else 2}f}) {_amt(res['net_quote'], c)}{U}"
-             f" | 파일의 Cboe 감마로 계산 {_amt(res['net_cboe'], c)}{U}")
+                 f" | 오늘 값은 낮은 쪽에서 {st['rank_low']}번째 | {'음' if st['run_sign'] < 0 else '양'}의 감마 {st['run']}일째 | 중앙값 {st['median']:+.1f}bn")
+    L.append(f"  [계산 기준에 따른 차이] 옵션 마감 호가 시점 그대로(지수 환산 {res['ref']:,.1f}) {_bn(res['net_quote'])}bn | 파일의 Cboe 감마로 계산 {_bn(res['net_cboe'])}bn")
     L.append(f"  [가정] 딜러가 콜은 사 두고 풋은 팔아 둔 상태로 본다. 미결제약정은 전 영업일 마감 기준. 계약 {res['n']:,}줄, 만기 {res['n_exp']}개")
     for x in res.get("flags", []):
         L.append(f"  [확인 필요] {x}")
@@ -566,36 +445,15 @@ GT = {
 MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
 
 
-def _labels(lang, c):
-    """그림 글귀(GT)를 종목에 맞춘다: 종목 기호, 기초자산 이름, 금액 단위, '지수' -> '주가'. SPX는 그대로다."""
-    ko = lang == "ko"
-    sub = [("SPX", c["t"]), ("S&P 500", c["name"]), ("십억 달러" if ko else "$bn", UNITS[c["unit"]][2 if ko else 3])]
-    if not c["index"]:
-        sub += [("지수", "주가")] if ko else [("the index were", "the price were"), ("index level", "price level"), ("index move", "move in the underlying")]
-    if c["t"] in FUT_BASED:                                                 # 현물 종가가 아니라 근월 선물 수준에서 계산한 종목
-        sub += [("종가가", "근월 선물이"), ("종가", "근월 선물")] if ko else [("close", "front future"), ("Close", "Front future")]
-
-    def f(o):
-        if isinstance(o, dict):
-            return {k: f(v) for k, v in o.items()}
-        if isinstance(o, list):
-            return [f(v) for v in o]
-        if isinstance(o, str):
-            for a, b in sub:
-                o = o.replace(a, b)
-        return o
-    return f(GT[lang])
-
-
 class _Canvas:
-    """가로 W픽셀짜리 그림판. 좌표는 왼쪽 위가 (0, 0)인 픽셀이다. c = _ctx() 결과(종목별 표기)."""
+    """가로 W픽셀짜리 그림판. 좌표는 왼쪽 위가 (0, 0)인 픽셀이다."""
 
-    def __init__(self, W, H, c=None):
+    def __init__(self, W, H):
         from matplotlib.backends.backend_agg import FigureCanvasAgg
         from matplotlib.figure import Figure
         from vix_decomp import SURF, _font
         self.W, self.H, self.font = W, H, _font()
-        self.L = _labels("ko" if self.font else "en", c) if c else GT["ko" if self.font else "en"]
+        self.L = GT["ko" if self.font else "en"]
         self.fam, self.pt = self.font or "DejaVu Sans", 72 / DPI
         self.fig = Figure(figsize=(W / DPI, H / DPI), dpi=DPI, facecolor=SURF)
         FigureCanvasAgg(self.fig)
@@ -718,14 +576,12 @@ def chart(res, path):
     spot, flip = res["spot"], res["flip"]
     has_flip = flip is not None and flip == flip
     bars, hs = res.get("ohlc"), res.get("history") or {}
-    c_ = _ctx(res)
-    nd, div, sfx, bucket = c_["nd"], c_["div"], UNITS[c_["unit"]][1], float(res.get("bucket") or BUCKET)
     W, HEAD, GH = 2160, 150, 640
     left, PW, GAP, SW = 110, 1020, 40, 400                                # 왼쪽 여백, 가격 그림 폭, 그림 사이 간격, GEX 그림 하나의 폭
     left2, left3 = left + PW + GAP, left + PW + GAP + SW + GAP
     right = left3 + SW
     H = HEAD + 96 + GH + 104 + 104
-    cv = _Canvas(W, H, c_)
+    cv = _Canvas(W, H)
     L, text, pt = cv.L, cv.text, cv.pt
 
     # 제목과 요약(한 줄)
@@ -735,15 +591,15 @@ def chart(res, path):
     w30, wa = res["walls30"], res["walls"]
     q = _sgn(res["pct"], 1)
     cv.tile(680, 6, L["spx"], f"{spot:,.2f}", L["chg"].format(v=_sgn(chg, 2)) if chg is not None else "")
-    cv.tile(930, 6, L["net"], _sgn(res["net"] / div, 1, "$") + sfx,
-            L["net_s"].format(p=_sgn(p["net"] / div, 1, "$") + sfx, q=q) if p else L["net_s0"].format(q=q))
+    cv.tile(930, 6, L["net"], _sgn(res["net"] / 1e9, 1, "$") + "B",
+            L["net_s"].format(p=_sgn(p["net"] / 1e9, 1, "$") + "B", q=q) if p else L["net_s0"].format(q=q))
     if has_flip:
         d = flip - spot
-        cv.tile(1290, 6, L["flip"], _lv(flip, nd), L["below" if d > 0 else "above"].format(d=_lv(abs(d), nd), p=f"{100 * abs(d) / spot:.2f}"),
+        cv.tile(1290, 6, L["flip"], f"{flip:,.0f}", L["below" if d > 0 else "above"].format(d=f"{abs(d):,.0f}", p=f"{100 * abs(d) / spot:.2f}"),
                 sw=C_NEG if d > 0 else C_POS)
     else:
         cv.tile(1290, 6, L["flip"], "–", L["noflip"])
-    cv.tile(1700, 6, L["walls"], f"{_lv(w30['call'], 2)} · {_lv(w30['put'], 2)}", L["walls_s"].format(c=_lv(wa["call"], 2), p=_lv(wa["put"], 2)))
+    cv.tile(1700, 6, L["walls"], f"{_lv(w30['call'])} · {_lv(w30['put'])}", L["walls_s"].format(c=_lv(wa["call"]), p=_lv(wa["put"])))
 
     # 가격 자료: 일봉이 있으면 최근 250일, 없으면 추이 표의 종가
     top = HEAD
@@ -764,18 +620,15 @@ def chart(res, path):
     # 세로축(지수 수준): 가격이 움직인 범위와 종가의 -12%~+9%를 모두 담는다
     lo_all = [spot * 0.88] + ([float(np.nanmin(lo_))] if n else []) + [float(np.nanmin(v)) for v in ma.values()]
     hi_all = [spot * 1.09] + ([float(np.nanmax(hi_))] if n else []) + [float(np.nanmax(v)) for v in ma.values()]
-    q_ = 2 * bucket                                                        # 세로축 끝을 맞추는 단위(SPX는 50)
-    ylo, yhi = q_ * math.floor(min(lo_all) * 0.995 / q_), q_ * math.ceil(max(hi_all) * 1.003 / q_)
+    ylo, yhi = 50 * math.floor(min(lo_all) * 0.995 / 50), 50 * math.ceil(max(hi_all) * 1.003 / 50)
     sy = GH / (yhi - ylo)
-    yticks, ystep = _ticks(ylo, yhi, 7)
-    td = 0 if ystep >= 1 else 1 if ystep >= 0.1 else 2
 
     def py_(v):
         return ptop + (yhi - v) * sy
-    for t in [t for t in yticks if ylo < t < yhi]:
+    for t in [t for t in _ticks(ylo, yhi, 7)[0] if ylo < t < yhi]:
         for xx, ww in ((left, PW), (left2, SW), (left3, SW)):
             cv.line([xx, xx + ww], [py_(t), py_(t)], GRID, 1.0)
-        text(left - 14, py_(t) + 7, f"{t:,.{td}f}", 20, MUTED, ha="right")
+        text(left - 14, py_(t) + 7, f"{t:,.0f}", 20, MUTED, ha="right")
 
     # 가격 차트
     text(left, top + 46, L["price"] if bars else L["price0"], 26, INK, "bold")
@@ -810,19 +663,19 @@ def chart(res, path):
         text(left, top + 77, L["noprice"], 19, MUTED)
 
     # 행사가별 GEX
-    for xx, a, b in ((left2, L["strike"], L["strike_s"].format(b=f"{bucket:g}")), (left3, L["prof"], L["prof_s"])):
+    for xx, a, b in ((left2, L["strike"], L["strike_s"].format(b=f"{BUCKET:g}")), (left3, L["prof"], L["prof_s"])):
         text(xx, top + 46, a, 26, INK, "bold")
         text(xx, top + 77, b, 19, INK2)
     K, gc, gp = (_arr(res["strikes"][k]) for k in ("K", "call", "put"))
-    bk = pd.Series((gc - gp) / div).groupby(np.floor(K / bucket + 0.5) * bucket).sum()
+    bk = pd.Series((gc - gp) / 1e9).groupby(np.floor(K / BUCKET + 0.5) * BUCKET).sum()
     bk = bk[(bk.index > ylo) & (bk.index < yhi)]
     xm = _nice(1.06 * float(bk.abs().max()) if len(bk) else 0.0)
     ax = cv.axes(left2, ptop, SW, GH, (-xm, xm), (ylo, yhi))
-    ax.barh(bk.index[bk >= 0], bk[bk >= 0], height=bucket * 0.62, color=C_POS)
-    ax.barh(bk.index[bk < 0], bk[bk < 0], height=bucket * 0.62, color=C_NEG)
+    ax.barh(bk.index[bk >= 0], bk[bk >= 0], height=BUCKET * 0.62, color=C_POS)
+    ax.barh(bk.index[bk < 0], bk[bk < 0], height=BUCKET * 0.62, color=C_NEG)
 
     # 가격별 프로필
-    pr, pn = _arr(res["profile"]["price"]), _arr(res["profile"]["net"]) / div
+    pr, pn = _arr(res["profile"]["price"]), _arr(res["profile"]["net"]) / 1e9
     m = (pr >= ylo) & (pr <= yhi)
     pr, pn = pr[m], pn[m]
     pm = _nice(1.06 * float(np.abs(pn).max()) if len(pn) else 0.0)
@@ -848,9 +701,9 @@ def chart(res, path):
     for (v, lab, col, dash), ty in zip(marks, ys):
         cv.line([left, right], [py_(v), py_(v)], col, 2.0, top=True, dashes=dash)
         cv.line([right, right + 12], [py_(v), ty], col, 1.4, top=True)
-        text(right + 18, ty + 7, f"{lab} {_lv(v, 2 if nd and lab == L['cl'] else nd)}", 20, INK, "medium", top=True)   # 종가는 센트까지
+        text(right + 18, ty + 7, f"{lab} {v:,.0f}", 20, INK, "medium", top=True)
     # 프로필 위의 점: 종가 수준의 값과 플립
-    net_bn = res["net"] / div
+    net_bn = res["net"] / 1e9
     cx, cy = left3 + (net_bn + pm) / (2 * pm) * SW, py_(spot)
     cv.dot(cx, cy, C_POS if net_bn >= 0 else C_NEG)
     toright = cx < left3 + SW * 0.55
@@ -870,21 +723,21 @@ def chart(res, path):
     x = left + cv.width(text(left, yl, L["byexp"], 19, INK2, "medium")) + 26
     for lab, v in ((L["e7"], res["net7"]), (L["e30"], res["net30"] - res["net7"]), (L["e99"], res["net"] - res["net30"])):
         x += cv.width(text(x, yl, lab, 19, MUTED)) + 10
-        x += cv.width(text(x, yl, _sgn(v / div, 1), 20, INK, "medium")) + 28
+        x += cv.width(text(x, yl, _sgn(v / 1e9, 1), 20, INK, "medium")) + 28
     x = left2
     for col, lab in ((C_POS, L["pos_s"]), (C_NEG, L["neg_s"])):
         cv.swatch(x, yl, col, 17)
         x += 27
         x += cv.width(text(x, yl, lab, 19, INK2)) + 34
     fy = top + 96 + GH + 104 + 40
-    foot = [f.format(a=_sgn(res["net_quote"] / div, 1), b=_sgn(res["net_cboe"] / div, 1)) for f in L["foot"]]
+    foot = [f.format(a=_sgn(res["net_quote"] / 1e9, 1), b=_sgn(res["net_cboe"] / 1e9, 1)) for f in L["foot"]]
     for i, s_ in enumerate(foot):
         text(40 if i < 2 else left2 - 60, fy + 30 * (i % 2), s_, 18, MUTED)
     return cv.save(path)
 
 
 def chart_history(res, path):
-    """추이 그림: 종가와 감마 플립, 순 GEX(콜·풋 합계 대비 %). PNG(가로 1080픽셀)로 저장한다."""
+    """추이 그림: S&P 500 종가와 감마 플립, 순 GEX(콜·풋 합계 대비 %). PNG(가로 1080픽셀)로 저장한다."""
     from vix_decomp import BASE, GRID, INK, INK2, MUTED, _ticks
     if "error" in res:
         raise ValueError(res["error"])
@@ -897,9 +750,7 @@ def chart_history(res, path):
     W, KH, P1, P2 = 1080, 290, 420, 300
     FT = 46 + 30 * len(GT["ko"]["h_foot"]) + 24
     H = 132 + KH + 28 + 130 + P1 + 64 + 28 + 96 + P2 + 64 + FT
-    c_ = _ctx(res)
-    nd, div, sfx = c_["nd"], c_["div"], UNITS[c_["unit"]][1]
-    cv = _Canvas(W, H, c_)
+    cv = _Canvas(W, H)
     L, text, pt = cv.L, cv.text, cv.pt
     text(40, 66, L["h_title"], 40, INK, "bold")
     text(40, 104, L["h_sub"].format(a=_ymd(dts[0]), b=_ymd(dts[-1]), n=n), 22, INK2)
@@ -910,11 +761,11 @@ def chart_history(res, path):
     has_flip = flip is not None and flip == flip
     cv.tile(70, top + 8, L["spx"], f"{spot:,.2f}", _ymd(res["date"]))
     q = _sgn(res["pct"], 1)
-    cv.tile(560, top + 8, L["net"], _sgn(res["net"] / div, 1, "$") + sfx,
-            L["net_s"].format(p=_sgn(p["net"] / div, 1, "$") + sfx, q=q) if p else L["net_s0"].format(q=q))
+    cv.tile(560, top + 8, L["net"], _sgn(res["net"] / 1e9, 1, "$") + "B",
+            L["net_s"].format(p=_sgn(p["net"] / 1e9, 1, "$") + "B", q=q) if p else L["net_s0"].format(q=q))
     if has_flip:
         d = flip - spot
-        cv.tile(70, top + 132, L["flip"], _lv(flip, nd), L["below" if d > 0 else "above"].format(d=_lv(abs(d), nd), p=f"{100 * abs(d) / spot:.2f}"),
+        cv.tile(70, top + 132, L["flip"], f"{flip:,.0f}", L["below" if d > 0 else "above"].format(d=f"{abs(d):,.0f}", p=f"{100 * abs(d) / spot:.2f}"),
                 sw=C_NEG if d > 0 else C_POS)
     else:
         cv.tile(70, top + 132, L["flip"], "–", L["noflip"])
@@ -945,8 +796,7 @@ def chart_history(res, path):
             x += 52
         x += cv.width(text(x, top + 104, lab, 19, INK2)) + 30
     both = np.concatenate([px, fl[~np.isnan(fl)]])
-    yt, ystep = _ticks(float(both.min()), float(both.max()), 5)
-    td = 0 if ystep >= 1 else 1 if ystep >= 0.1 else 2
+    yt, _ = _ticks(float(both.min()), float(both.max()), 5)
     pad = 0.05 * (both.max() - both.min())
     ylo, yhi = min(both.min() - pad, yt[0]), max(both.max() + pad, yt[-1])
     ptop = top + 130
@@ -956,7 +806,7 @@ def chart_history(res, path):
         ax.axvspan(i - 0.5, i + 0.5, color=C_NEG, alpha=0.13, lw=0)
     for t in yt:
         ax.plot(xl, [t, t], color=GRID, lw=1.0 * pt)
-        text(left - 14, ptop + (yhi - t) * sy + 7, f"{t:,.{td}f}", 20, MUTED, ha="right")
+        text(left - 14, ptop + (yhi - t) * sy + 7, f"{t:,.0f}", 20, MUTED, ha="right")
     xs = np.arange(n)
     ax.plot(xs, fl, color=INK2, lw=3.0 * pt, dashes=(3, 2))
     ax.plot(xs, px, color=INK, lw=4.2 * pt, solid_joinstyle="round", solid_capstyle="round")
@@ -970,7 +820,7 @@ def chart_history(res, path):
     cv.dot(ex, ptop + (yhi - px[-1]) * sy, INK, r=9)
     for (v, lab), yy in zip(ends, ys):
         text(left + pw_ + 14, yy - 5, lab, 19, INK2, top=True)
-        text(left + pw_ + 14, yy + 21, _lv(v, 2 if nd and lab == L["cl"] else nd), 21, INK, "medium", top=True)
+        text(left + pw_ + 14, yy + 21, f"{v:,.0f}", 21, INK, "medium", top=True)
 
     # 순 GEX, 콜·풋 합계 대비 %
     top = top + 130 + P1 + 64 + 28
@@ -994,110 +844,78 @@ def chart_history(res, path):
 
 
 # ----------------------------------------------------------------------------- 실행
-def _emit(res, a, ticker):
-    """한 종목의 그림을 만든다. ticker = 저장 경로에 붙일 종목(None이면 준 경로 그대로)."""
+def run(a):
+    if a.from_json:
+        with open(a.from_json, encoding="utf-8") as f:
+            res = json.load(f)
+        res = res.get("gex", res)
+        print(report(res))
+    else:
+        dates = list_dates(a.archive_dir)
+        if a.date:
+            dates = [d for d in dates if d <= a.date]
+            if not dates or dates[-1] != a.date:
+                print(f"[오류] {a.date} 보관본이 없음")
+                return 1
+        if not dates:
+            print("[오류] 보관본이 없음")
+            return 1
+        hist = read_history(a.history_csv) if a.history_csv else pd.DataFrame(columns=HIST_COLS)
+        have = set(hist["date"]) if len(hist) else set()
+        need = [d for d in dates if d not in have or d == dates[-1]]            # 표에 없는 날과 마지막 날만 계산한다
+        if a.lookback is not None:
+            need = need[-(a.lookback + 1):]
+        closes = {} if a.no_yf else index_closes(need)
+        saved = read_closes(a.closes_csv) if a.closes_csv else {}
+        rows, last, gap = [], None, NAN
+        for d in need:
+            try:
+                dd = load_day(a.archive_dir, d, ["SPX"])
+            except Exception as e:
+                print(f"[확인 필요] {d} 보관본을 읽지 못함: {type(e).__name__}")
+                continue
+            if "SPX" not in dd or not len(dd["SPX"]):
+                print(f"[확인 필요] {d} 보관본에 SPX가 없음")
+                continue
+            spot, diff = pick_close(closes.get(d, {}).get("spx"), saved.get(d))
+            r = day(dd["SPX"], d, spot)
+            r["spot_is_close"] = spot == spot
+            if r["spot_is_close"] or not a.require_close:                         # 수집기는 공식 종가가 있는 날만 표에 넣는다
+                rows.append(hist_row(r))
+            if d == dates[-1]:
+                last, gap = r, diff
+        hist = merge_history(hist, rows)
+        if a.history_csv and a.save_history and any(rows):
+            save_history(hist, a.history_csv)
+            print(f"추이 표: {a.history_csv} ({len(hist)}일)")
+        if last is None:
+            print(f"[오류] {dates[-1]}의 SPX 자료를 계산하지 못함")
+            return 1
+        res = summary(last, hist, None if a.no_yf else ohlc(dates[-1]))
+        if "error" not in res and not last.get("spot_is_close"):
+            res["flags"].append("지수 종가를 받지 못해 옵션 호가에 담긴 지수 수준을 종가 대신 씀")
+        if "error" not in res and gap == gap and abs(gap) > 0.02:
+            res["flags"].append(f"수집할 때 적어 둔 지수 종가({saved[dates[-1]]:,.2f})가 야후 종가({last['spot']:,.2f})와 {gap:+.2f}% 다름")
+        print(report(res))
+        res = clean(res)
+        if a.out_json:
+            with open(a.out_json, "w", encoding="utf-8") as f:
+                json.dump(res, f, ensure_ascii=False, indent=1)
+            print(f"\nJSON: {a.out_json}")
     if "error" in res:
         return 1
-    png, pngh = out_path(a.png, ticker), out_path(a.png_history, ticker)
-    if png:
-        print("GEX 그림:", chart(res, png))
-    if pngh:
+    if a.png:
+        print("GEX 그림:", chart(res, a.png))
+    if a.png_history:
         try:
-            print("GEX 추이 그림:", chart_history(res, pngh))
+            print("GEX 추이 그림:", chart_history(res, a.png_history))
         except ValueError as e:
             print(f"[확인 필요] 추이 그림을 만들지 못함: {e}")
     return 0
 
 
-def run(a):
-    tickers = list(dict.fromkeys(t.upper() for t in (getattr(a, "tickers", None) or [])))
-    if a.from_json:                                                            # 저장해 둔 결과로 보고와 그림만 다시
-        rc = 0
-        for t in tickers or [None]:
-            with open(out_path(a.from_json, t), encoding="utf-8") as f:
-                res = json.load(f)
-            res = res.get("gex", res)
-            print(report(res))
-            rc |= _emit(res, a, t)
-        return rc
-    tickers = tickers or ["SPX"]
-    dates = list_dates(a.archive_dir)
-    if a.date:
-        dates = [d for d in dates if d <= a.date]
-        if not dates or dates[-1] != a.date:
-            print(f"[오류] {a.date} 보관본이 없음")
-            return 1
-    if not dates:
-        print("[오류] 보관본이 없음")
-        return 1
-    jobs = {}
-    for t in tickers:
-        hp = out_path(a.history_csv, t)
-        hist = read_history(hp) if hp else pd.DataFrame(columns=HIST_COLS)
-        have = set(hist["date"]) if len(hist) else set()
-        need = [d for d in dates if d not in have or d == dates[-1]]            # 표에 없는 날과 마지막 날만 계산한다
-        if a.lookback is not None:
-            need = need[-(a.lookback + 1):]
-        jobs[t] = {"hp": hp, "hist": hist, "need": set(need), "rows": [], "last": None, "gap": NAN, "bad_close": None,
-                   "closes": {} if a.no_yf else closes_for(t, need),
-                   "saved": read_closes(a.closes_csv, t) if a.closes_csv and t not in FUT_BASED else {}}
-    for d in sorted(set().union(*(j["need"] for j in jobs.values()))):           # 하루치 압축파일은 한 번만 읽는다
-        want = [t for t in tickers if d in jobs[t]["need"]]
-        try:
-            dd = load_day(a.archive_dir, d, want)
-        except Exception as e:
-            print(f"[확인 필요] {d} 보관본을 읽지 못함: {type(e).__name__}")
-            continue
-        for t in want:
-            j = jobs[t]
-            if t not in dd or not len(dd[t]):
-                print(f"[확인 필요] {d} 보관본에 {t}가 없음")
-                continue
-            spot, diff = pick_close(j["closes"].get(d), j["saved"].get(d))
-            r = day(dd[t], d, spot, t)
-            bad = None
-            if "error" not in r and spot == spot and abs(r["ref"] / spot - 1) > SPLIT_GAP:   # 액면분할 직후 등: 종가를 버린다
-                bad, spot = spot, NAN
-                r = day(dd[t], d, NAN, t)
-            r["spot_is_close"] = spot == spot
-            if r["spot_is_close"] or not a.require_close:                         # 수집기는 공식 종가가 있는 날만 표에 넣는다
-                j["rows"].append(hist_row(r))
-            if d == dates[-1]:
-                j["last"], j["gap"], j["bad_close"] = r, diff, bad
-    rc = 0
-    for t in tickers:
-        j = jobs[t]
-        hist = merge_history(j["hist"], j["rows"])
-        if j["hp"] and a.save_history and any(j["rows"]):
-            save_history(hist, j["hp"])
-            print(f"추이 표: {j['hp']} ({len(hist)}일)")
-        last = j["last"]
-        if last is None:
-            print(f"[오류] {dates[-1]}의 {t} 자료를 계산하지 못함")
-            rc = 1
-            continue
-        res = summary(last, hist, None if a.no_yf else ohlc(dates[-1], sym=YF.get(t, t.replace(".", "-"))))
-        if "error" not in res:
-            if j["bad_close"] is not None:
-                res["flags"].append(f"종가({j['bad_close']:,.2f})가 옵션 호가에 담긴 수준({last['ref']:,.2f})과 {SPLIT_GAP:.0%} 넘게 달라"
-                                    "(액면분할 직후 등) 옵션 호가의 수준에서 계산함")
-            elif not last.get("spot_is_close") and t not in FUT_BASED:
-                res["flags"].append(("지수 종가를" if t in INDEX else "종가를") + f" 받지 못해 옵션 호가에 담긴 {_ctx(res)['u']} 수준을 종가 대신 씀")
-            if j["gap"] == j["gap"] and abs(j["gap"]) > 0.02:
-                res["flags"].append(f"수집할 때 적어 둔 지수 종가({j['saved'][dates[-1]]:,.2f})가 야후 종가({last['spot']:,.2f})와 {j['gap']:+.2f}% 다름")
-        print(report(res))
-        res = clean(res)
-        js = out_path(a.out_json, t)
-        if js:
-            with open(js, "w", encoding="utf-8") as f:
-                json.dump(res, f, ensure_ascii=False, indent=1)
-            print(f"\nJSON: {js}")
-        rc |= _emit(res, a, t)
-    return rc
-
-
-def synthetic(date="20260611", spot=5000.0, vol=lambda k: 0.2, extra=(), root="SPXW"):
-    """자체 점검용 가상 체인(보관본 CSV와 같은 열. 기본은 SPX, root를 바꾸면 다른 종목). 만기 3개, 행사가 4,000~6,000을 25 간격으로, 가격은 Black-76 이론가.
+def synthetic(date="20260611", spot=5000.0, vol=lambda k: 0.2, extra=()):
+    """자체 점검용 가상 SPX 체인(보관본 CSV와 같은 열). 만기 3개, 행사가 4,000~6,000을 25 간격으로, 가격은 Black-76 이론가.
     미결제약정은 4,800 풋과 5,200 콜에 몰아 두었다. extra = [(만기 순번, 행사가, "C"/"P", 미결제약정), …]를 더 얹을 수 있다."""
     from option_sentiment import b76
     tv = quote_time(date)
@@ -1110,7 +928,7 @@ def synthetic(date="20260611", spot=5000.0, vol=lambda k: 0.2, extra=(), root="S
             for cp, sgn in (("C", 1.0), ("P", -1.0)):
                 px = float(b76(F, K, T, vol(K), sgn))
                 oi = {("C", 5200.0): 9000, ("P", 4800.0): 14000}.get((cp, K), 300) + sum(x[3] for x in extra if x[:3] == (n, K, cp))
-                rows.append({"Symbol": f"{root}{exp:%y%m%d}{cp}{int(K * 1000):08d}", "Expiry": f"{exp:%Y-%m-%d}", "Type": "Call" if cp == "C" else "Put",
+                rows.append({"Symbol": f"SPXW{exp:%y%m%d}{cp}{int(K * 1000):08d}", "Expiry": f"{exp:%Y-%m-%d}", "Type": "Call" if cp == "C" else "Put",
                              "Strike": K, "Bid": px * 0.999, "Ask": px * 1.001, "Last": px, "Volume": 0, "Open Interest": oi, "IV": vol(K),
                              "Delta": 0.0, "Gamma": 0.0})
     return pd.DataFrame(rows)
@@ -1158,28 +976,15 @@ def self_test():
     out = summary(res, h)
     assert out["flags"] == [] and "stats" not in out and "prev" not in out
     assert "error" in day(df[df["dte"] < 0], date, S)
-    # 종목별 설정: 저장 경로, 묶음 폭, 자릿수, 금액 단위. 같은 체인을 다른 종목으로 읽어도 순 GEX는 같다
-    assert out_path("a/gex.png", "SPX") == "a/gex.png" and out_path("a/gex.png", "GLD") == "a/gex_gld.png"
-    assert out_path("a/{t}/gex.png", "BRK.B") == "a/brkb/gex.png" and out_path(None, "GLD") is None and out_path("x.csv", None) == "x.csv"
-    assert [bucket_of("SPX", 7500.0), bucket_of("GLD", 355.0), bucket_of("QQQ", 680.0), bucket_of("F", 12.0)] == [25.0, 1.0, 2.5, 0.05]
-    assert bucket_of("X", 100.0, np.arange(80.0, 121.0, 5.0)) == 5.0, "행사가 간격보다 좁아지지 않는다"
-    assert [digits(7500.0), digits(355.0), digits(19.4)] == [0, 1, 2] and [_lv(7700.0, 2), _lv(352.37, 1), _lv(22.5, 2), _lv(NAN)] == ["7,700", "352.4", "22.5", "-"]
-    assert unit_of(3e9, "GLD") == "mn" and unit_of(3e9, "SPX") == "bn" and unit_of(2e10, "QQQ") == "bn"
-    other = day(prep(synthetic(date, S, skew, root="XYZ"), "XYZ", date), date, S, "XYZ")
-    assert other["ticker"] == "XYZ" and other["unit"] == "mn" and abs(other["net"] / res["net"] - 1) < 2e-3, "다른 종목(16:00 마감)"
-    assert "주가 1% 움직임당" in report(summary(other, h)) and "지수 1% 움직임당" in report(out)
     print("자체 점검 통과")
     return 0
 
 
 def main():
-    ap = argparse.ArgumentParser(description="보관본의 옵션으로 딜러 감마 노출(GEX)을 계산하고 그림을 만든다(기본 종목: SPX)")
+    ap = argparse.ArgumentParser(description="보관본의 SPX 옵션으로 딜러 감마 노출(GEX)을 계산하고 그림을 만든다")
     ap.add_argument("--archive-dir", default="data/daily")
-    ap.add_argument("--tickers", nargs="+", metavar="T",
-                    help="종목(기본: SPX). 여러 개를 주면 종목마다 따로 계산한다. 저장 경로는 SPX는 그대로, "
-                         "다른 종목은 확장자 앞에 _종목 을 붙인다(경로에 {t}를 넣으면 그 자리에 종목이 들어간다)")
     ap.add_argument("--date", help="기준일 YYYYMMDD(기본: 가장 최근 보관본)")
-    ap.add_argument("--history-csv", help="추이 표(CSV). 있으면 읽어서 빠진 날짜만 새로 계산한다. 종목마다 따로 둔다")
+    ap.add_argument("--history-csv", help="추이 표(CSV). 있으면 읽어서 빠진 날짜만 새로 계산한다")
     ap.add_argument("--save-history", action="store_true", help="새로 계산한 날짜를 추이 표에 써 넣는다")
     ap.add_argument("--closes-csv", help="수집기가 적어 둔 지수 종가 표(CSV). 야후에서 종가를 받지 못한 날에 쓴다")
     ap.add_argument("--require-close", action="store_true", help="공식 종가가 없는 날은 추이 표에 넣지 않는다(수집기용)")
@@ -1187,7 +992,7 @@ def main():
     ap.add_argument("--png", help="GEX 그림(PNG) 저장 경로")
     ap.add_argument("--png-history", help="GEX 추이 그림(PNG) 저장 경로")
     ap.add_argument("--out-json")
-    ap.add_argument("--from-json", help="저장해 둔 결과(JSON)로 보고와 그림만 다시 만든다(--tickers를 주면 종목별 경로에서 읽는다)")
+    ap.add_argument("--from-json", help="저장해 둔 결과(JSON)로 보고와 그림만 다시 만든다")
     ap.add_argument("--no-yf", action="store_true", help="야후 파이낸스에서 종가·일봉을 받지 않는다")
     ap.add_argument("--self-test", action="store_true")
     a = ap.parse_args()
