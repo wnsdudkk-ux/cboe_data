@@ -39,7 +39,7 @@ pip install -r requirements.txt
 python collect.py                # 이미 오늘치가 있으면 'exists' 출력 후 종료
 python collect.py --force        # 재수집
 python collect.py --tickers BRK.B NVR --out-dir /tmp/t   # 테스트
-python -m unittest discover -s tests                      # 단위테스트 (64개)
+python -m unittest discover -s tests                      # 단위테스트 (75개)
 ```
 
 출력 규약: `OK:`(성공) / `exists:`(할 일 없음) / `ERROR:`(성공률 미달·수집 가능 시간
@@ -55,11 +55,11 @@ claude.ai 예약 작업(화~토 아침 KST)이 이 스크립트를 받아 실행
 ```bash
 # 저장소 전체(1.5GB 이상)를 받지 않고 스크립트와 최근 21일치 보관본만 받는다 (약 380MB, 20초)
 git clone --depth 1 --filter=blob:none --no-checkout https://github.com/wnsdudkk-ux/cboe_data.git && cd cboe_data
-git checkout HEAD -- option_sentiment.py $(git ls-tree -r --name-only HEAD data/daily | grep -E 'quotes_[0-9]{8}\.tar\.gz$' | sort | tail -21)
-pip install pandas numpy exchange_calendars yfinance      # 뒤의 둘은 선택(휴장일 판정, 종가 대조)
-python option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json
+git checkout HEAD -- option_sentiment.py vix_decomp.py $(git ls-tree -r --name-only HEAD data/daily | grep -E 'quotes_[0-9]{8}\.tar\.gz$' | sort | tail -21)
+pip install -r requirements-analysis.txt                   # pandas, numpy + 선택(휴장일 판정, 종가 대조, 그림)
+python option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json --vix-chart vix.png
 python option_sentiment.py --archive-dir data/daily --tickers QQQ --date 20261113   # 날짜 지정
-python option_sentiment.py --self-test                     # 접속 없이 계산 로직 점검
+python option_sentiment.py --self-test && python vix_decomp.py --self-test          # 접속 없이 계산 로직 점검
 ```
 
 `git ls-tree -l`처럼 파일 크기를 묻는 명령은 모든 보관본을 내려받게 만드니 쓰지 않는다.
@@ -88,13 +88,72 @@ python option_sentiment.py --self-test                     # 접속 없이 계�
   표본 15개). VIX 옵션은 파일 `IV` 열이 크게 틀리는 날이 많다. 파일 값은 대조용으로만
   출력하고, 평소보다 크게 어긋난 날은 `[확인 필요]`로 알린다.
 - 보관본에는 기초자산 가격과 수집 시각 열이 없다. 기초자산 수준은 패리티 선도가로,
-  수집 시각은 압축파일 안 CSV의 수정 시각으로 읽는다. SPX·VIX 옵션은 정규장 뒤
-  17:00(미 동부)까지 연장 거래가 있어 선도가에 마감 뒤 움직임이 섞인다. 야후 종가를
+  수집 시각은 압축파일 안 CSV의 수정 시각으로 읽는다. SPX 옵션 호가는 정규장 마감
+  (미 동부 16:15) 시점 값이다(아래 'VIX 직접 계산' 참고). 현물 지수 종가는 16:00 값이라
+  선도가와 종가의 차이에는 보유 비용과 16:00~16:15의 움직임이 들어 있다. 야후 종가를
   받을 수 있으면 함께 출력한다.
 - `Open Interest`는 전 영업일 마감 기준이다. 두 파일 사이의 증감은 **전 거래일** 거래의
   결과이고 `Volume`은 당일 것이다(11-12→11-13 SPX에서 증감과 11-12 거래량의 상관 0.81,
   11-13 거래량과는 0.31).
 - "평소의 N배"는 그 지표의 과거 하루 변화 절댓값의 중앙값 대비 오늘 변화의 크기다.
+
+## VIX 직접 계산·분해 — vix_decomp.py
+
+보관본의 SPX 옵션 호가만으로 VIX를 다시 계산하고, 하루 변화를 Cboe의
+[VIX Decomposition 도구](https://www.cboe.com/tradable-products/vix/vix-decomposition/)와
+같은 여섯 요인으로 나눈다. `option_sentiment.py`가 SPX를 분석할 때 함께 부르고
+(`--vix-chart 경로`를 주면 그림도 만든다), 단독으로도 돈다.
+
+```bash
+python vix_decomp.py --archive-dir data/daily --png vix.png --out-json vix.json   # 최신 보관본과 그 직전 수집일
+python vix_decomp.py --archive-dir data/daily --date 20261105 --png vix.png        # 날짜 지정
+python vix_decomp.py --from-json out.json --png vix.png                            # 계산해 둔 결과로 그림만 다시
+```
+
+**VIX 계산.** Cboe 방법론 문서의 규칙을 그대로 따른다: 잔존 30일 이하에서 가장 먼
+주말 만기와 그다음 주말 만기(셋째 금요일은 아침 결제 SPX, 그 밖은 SPXW. 금요일이
+휴장이면 목요일) / 콜·풋 가격 차가 가장 작은 행사가로 선도가 계산 / 선도가 아래는 풋,
+위는 콜 / 매수호가나 매도호가가 0이면 제외하고 연달아 두 번 0이면 그 바깥은 버림 /
+행사가 간격과 호가 중간값으로 분산을 구해 30일로 보간. 금리만 고정값(4%)이다.
+
+2026-07-06~11-13의 86일로 대조하니, 자료 시점이 어긋난 이틀(09-23은 장중에 만들어진
+낡은 파일, 07-06은 야간 거래가 열린 뒤 수집)을 뺀 84일에서 직접 계산한 값과 공식 VIX
+종가의 차이가 평균 +0.003, 표준편차 0.007, 가장 큰 날 0.03이었다. 그래서 이 차이가
+0.05를 넘는 날은 그날 SPX 호가가 마감 시점 값이 아닐 수 있다고 `[확인 필요]`로 알린다.
+
+**요인 여섯 개** (합 = 직접 계산한 VIX의 하루 변화. 정확히 일치한다)
+
+두 만기의 행사가별 IV를 '분산 x 일수'로 보간해 잔존 30일짜리 곡선 하나를 만들고
+(백서 부록의 방식), 그 곡선에서 등가격 IV를 읽는다. 등가격 행사가는 S&P 500 종가에
+가장 가까운 25단위 행사가다.
+
+| 요인 | 정의 |
+|---|---|
+| 곡선 따라 이동 (sticky strike) | 어제 곡선에서, 오늘 등가격 행사가의 IV − 어제 등가격 행사가의 IV |
+| 평행 이동 (parallel shift) | 오늘 등가격 행사가에서, 오늘 곡선의 IV − 어제 곡선의 IV |
+| 풋 스큐 / 콜 스큐 | 'VIX − 등가격 IV' 가운데 델타 10~50인 풋 / 콜이 차지하는 몫의 변화 |
+| 하방 볼록성 / 상방 볼록성 | 같은 것 가운데 델타 10 미만인 풋 / 콜이 차지하는 몫의 변화 |
+
+구간의 몫 = 그 구간 옵션이 VIX에 실제로 기여한 포인트 − 곡선이 평평했다면(모든 행사가의
+IV가 등가격 IV와 같다면) 기여했을 포인트. 네 몫을 더하면 그날의 'VIX − 등가격 IV'가 된다.
+
+**Cboe 도구와의 대조** (2026-11-04→11-05, VIX 16.61→28.18)
+
+| | 곡선 따라 이동 | 평행 이동 | 풋 스큐 | 콜 스큐 | 하방 볼록성 | 상방 볼록성 |
+|---|---|---|---|---|---|---|
+| Cboe 도구 | 4.57 | 3.98 | 2.20 | −0.82 | 3.29 | −1.64 |
+| 이 스크립트 | 4.56 | 4.00 | 2.18 | −2.46 | 3.58 | −0.29 |
+
+앞의 두 요인은 정의가 같아 값도 맞는다. 30일 곡선도 도구의 그림과 같은 범위
+(3,200~10,000)와 값이 나온다. 뒤의 네 요인은 Cboe가 계산식을 공개하지 않아 같은 틀로
+직접 정의한 것이다. 풋 쪽 둘은 가깝고, 콜 쪽은 둘의 합(−2.46 대 −2.75)만 비슷하고
+스큐와 볼록성 사이의 배분이 다르다. 대조한 날이 하루뿐이라 다른 날에도 이 정도로
+맞는다고 볼 근거는 없다. 등가격 행사가를 25단위로 고르는 규칙도 이 하루의 값에 맞춘 것이다.
+
+**그림.** 표(두 날짜의 S&P 500·VIX, 하루 변화, 요인 여섯 개와 합계)와 내재변동성 곡선
+(전체 범위, 등가격 부근 확대)을 세로로 놓은 PNG 한 장(가로 1080픽셀)이다. 한글 글꼴이
+없는 환경에서는 글자가 영어로 바뀐다. S&P 500·VIX 종가는 야후 파이낸스에서 받고,
+받지 못하면 옵션에서 역산한 지수 수준과 직접 계산한 VIX를 대신 쓴다(그림에 표시).
 
 ## 설계상 중요한 결정들
 
@@ -138,9 +197,13 @@ python option_sentiment.py --self-test                     # 접속 없이 계�
 ## 클라우드 루틴 설정 (claude.ai/code/routines)
 
 - 스케줄: 매일 07:30 KST (= 미 동부 전날 17:30, 서머타임 기간에는 18:30).
-  SPX·VIX 옵션은 정규장 뒤 17:00 ET까지 연장 거래가 있고 시세가 15분 지연되므로,
-  17:15 ET 이후에 받아야 마감 호가가 확정된 상태다. 07:00 KST(겨울 17:00 ET)는 이르다.
-  야간 거래가 시작되는 20:15 ET(겨울 10:15 KST, 여름 09:15 KST) 전에는 끝나야 한다.
+  지연 시세의 SPX 옵션 호가는 정규장 마감(16:15 ET) 값에서 멈춰 있다가 야간 거래가
+  열리는 20:15 ET(겨울 10:15 KST, 여름 09:15 KST) 뒤에 바뀐다. 17:03~18:13 ET에 받은
+  84일치로 VIX를 다시 계산하니 모두 공식 종가와 0.03 안에서 맞았고(07:00 KST에 받던
+  날 포함), 21:11 ET에 받은 하루만 0.08 어긋났다. 그래서 16:30~20:15 ET 사이면 언제
+  받아도 같은 자료다. (이 문서의 이전 판은 "17:00 ET까지 연장 거래가 있어 17:15 ET
+  이후라야 호가가 확정된다, 07:00 KST는 이르다"고 적었는데, 연장 거래 호가가 지연
+  시세에 반영된다는 가정이 위 대조로 틀린 것으로 확인돼 고쳤다.)
 - 환경: Network access **Custom** + Allowed domains에 `cdn-api.cboe.com`,
   `cdn.cboe.com`, `raw.githubusercontent.com` (+기본 패키지 목록 포함 체크).
   `cdn-api.cboe.com`이 빠지면 `ERROR: 환경 네트워크 차단(...)`으로 끝난다.
