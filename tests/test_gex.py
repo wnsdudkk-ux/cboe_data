@@ -173,6 +173,113 @@ class Run(unittest.TestCase):
             self.assertIn("== SPX 감마 노출(GEX) | 20260611", out.getvalue())
 
 
+class MultiTicker(unittest.TestCase):
+    """여러 종목: 종목마다 따로 계산하고 따로 저장한다. SPX의 경로와 형식은 그대로다."""
+
+    def _archive(self, tmp, dates, tickers):
+        for d in dates:
+            with tarfile.open(os.path.join(tmp, f"quotes_{d}.tar.gz"), "w:gz") as tf:
+                for t in tickers:
+                    data = gex.synthetic(d, SPOT, root="SPXW" if t == "SPX" else t).to_csv(index=False).encode()
+                    info = tarfile.TarInfo(f"{d}/{t}/{t.lower()}_quotes_{d}.csv")
+                    info.size = len(data)
+                    tf.addfile(info, io.BytesIO(data))
+
+    def _run(self, a):
+        out = io.StringIO()
+        stdout, sys.stdout = sys.stdout, out
+        try:
+            rc = gex.run(a)
+        finally:
+            sys.stdout = stdout
+        return rc, out.getvalue()
+
+    def test_paths_units_and_labels_per_ticker(self):
+        self.assertEqual(gex.out_path("d/gex.png", "SPX"), "d/gex.png")
+        self.assertEqual(gex.out_path("d/gex.png", "GLD"), "d/gex_gld.png")
+        self.assertEqual(gex.out_path("d/{t}.csv", "BRK.B"), "d/brkb.csv")
+        self.assertEqual(gex.out_path("d/gex.png", None), "d/gex.png")
+        self.assertIsNone(gex.out_path(None, "GLD"))
+        self.assertEqual([gex.bucket_of(t, x) for t, x in (("SPX", 5000.0), ("GLD", 355.0), ("QQQ", 680.0))], [25.0, 1.0, 2.5])
+        self.assertEqual(gex.bucket_of("X", 100.0, np.arange(80.0, 121.0, 5.0)), 5.0)       # 행사가 간격보다 좁아지지 않는다
+        self.assertEqual([gex.unit_of(3e9, "SPX"), gex.unit_of(3e9, "GLD"), gex.unit_of(2e10, "QQQ")], ["bn", "mn", "bn"])
+        self.assertEqual([gex._lv(7700.0, 2), gex._lv(352.37, 1), gex._lv(22.5, 2), gex._lv(None)], ["7,700", "352.4", "22.5", "-"])
+        ko = gex._labels("ko", gex._ctx({"ticker": "GLD", "unit": "mn", "spot": 355.0}))
+        self.assertEqual((ko["title"], ko["spx"], ko["net"], ko["unit"]), ("GLD 감마 노출(GEX)", "GLD 종가", "순 GEX (주가 1% 움직임당)", "백만 달러"))
+        self.assertEqual(gex._labels("ko", gex._ctx({"ticker": "SPX", "unit": "bn", "spot": 5000.0})), gex.GT["ko"])   # SPX는 그대로
+        self.assertEqual(gex._labels("ko", gex._ctx({"ticker": "VIX", "unit": "mn", "spot": 19.0}))["cl"], "근월 선물")
+
+    def test_each_ticker_gets_its_own_history_json_and_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dates = ["20260610", "20260611"]
+            self._archive(tmp, dates, ["SPX", "XYZ"])
+            csv, js = os.path.join(tmp, "h.csv"), os.path.join(tmp, "o.json")
+            rc, out = self._run(args(archive_dir=tmp, tickers=["spx", "XYZ", "xyz"], history_csv=csv, save_history=True, out_json=js))
+            self.assertEqual(rc, 0)
+            self.assertEqual(sorted(f for f in os.listdir(tmp) if not f.endswith(".tar.gz")), ["h.csv", "h_xyz.csv", "o.json", "o_xyz.json"])
+            self.assertEqual(out.count("감마 노출(GEX) |"), 2)                          # 같은 종목을 두 번 줘도 한 번만 계산한다
+            self.assertIn("== SPX 감마 노출(GEX) | 20260611", out)
+            self.assertIn("== XYZ 감마 노출(GEX) | 20260611", out)
+            self.assertIn("mn(주가 1% 움직임당", out)
+            self.assertIn("bn(지수 1% 움직임당", out)
+            a, b = gex.read_history(csv), gex.read_history(os.path.join(tmp, "h_xyz.csv"))
+            self.assertEqual((list(a["date"]), list(b["date"])), (dates, dates))
+            self.assertAlmostEqual(a["net_bn"].iloc[-1], b["net_bn"].iloc[-1], delta=2e-3 * abs(a["net_bn"].iloc[-1]) + 1e-3)   # 같은 체인이라 값도 같다
+            with open(os.path.join(tmp, "o_xyz.json"), encoding="utf-8") as f:
+                res = json.load(f)
+            self.assertEqual((res["ticker"], res["unit"], res["bucket"]), ("XYZ", "mn", 25.0))
+            self.assertTrue(any(f.startswith("종가를 받지 못해") for f in res["flags"]))
+            rc, out = self._run(args(from_json=js, tickers=["XYZ"]))                    # 종목별 경로에서 다시 읽는다
+            self.assertEqual(rc, 0)
+            self.assertIn("== XYZ 감마 노출(GEX)", out)
+            rc, out = self._run(args(archive_dir=tmp, tickers=["SPX", "NONE"]))         # 보관본에 없는 종목은 그 종목만 실패한다
+            self.assertEqual(rc, 1)
+            self.assertIn("== SPX 감마 노출(GEX)", out)
+            self.assertIn("20260611의 NONE 자료를 계산하지 못함", out)
+
+    def test_close_far_from_the_option_level_is_dropped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._archive(tmp, ["20260610", "20260611"], ["XYZ"])
+            js = os.path.join(tmp, "o.json")
+            split = {"20260610": SPOT / 2, "20260611": SPOT / 2}                         # 액면분할 뒤 조정된 종가
+            with mock.patch.object(gex, "closes_for", return_value=split), mock.patch.object(gex, "ohlc", return_value=None):
+                rc, _ = self._run(args(archive_dir=tmp, tickers=["XYZ"], out_json=js, no_yf=False))
+            self.assertEqual(rc, 0)
+            with open(os.path.join(tmp, "o_xyz.json"), encoding="utf-8") as f:
+                res = json.load(f)
+            self.assertAlmostEqual(res["spot"], res["ref"])
+            self.assertTrue(any("액면분할" in f for f in res["flags"]))
+
+    def test_futures_based_ticker_ignores_the_spot_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._archive(tmp, ["20260610", "20260611"], ["VIX"])
+            cc, js = os.path.join(tmp, "c.csv"), os.path.join(tmp, "o.json")
+            with open(cc, "w", encoding="utf-8") as f:
+                f.write("date,spx,vix\n20260610,5000.00,4000.00\n20260611,5000.00,4000.00\n")
+            with mock.patch.object(gex, "index_closes", side_effect=AssertionError("받지 않아야 한다")), mock.patch.object(gex, "ohlc", return_value=None):
+                rc, _ = self._run(args(archive_dir=tmp, tickers=["VIX"], closes_csv=cc, out_json=js, no_yf=False))
+            self.assertEqual(rc, 0)
+            with open(os.path.join(tmp, "o_vix.json"), encoding="utf-8") as f:
+                res = json.load(f)
+            self.assertAlmostEqual(res["spot"], res["ref"])
+            self.assertTrue(any("근월 선물 수준에서 계산" in f for f in res["flags"]))
+            self.assertFalse(any("종가를 받지 못해" in f for f in res["flags"]))
+
+    def test_charts_render_for_a_small_cap_unit(self):
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            self.skipTest("matplotlib 없음")
+        df = prep(gex.synthetic(DATE, SPOT, root="XYZ"), "XYZ", DATE)
+        r = gex.day(df, DATE, SPOT, "XYZ")
+        rows = [{**gex.hist_row(r), "date": f"202605{d:02d}"} for d in range(11, 20)]
+        res = json.loads(json.dumps(gex.clean(gex.summary(r, gex.merge_history(pd.DataFrame(columns=gex.HIST_COLS), rows + [gex.hist_row(r)])))))
+        self.assertEqual(res["unit"], "mn")
+        with tempfile.TemporaryDirectory() as tmp:
+            for fn, name in ((gex.chart, "a.png"), (gex.chart_history, "b.png")):
+                self.assertGreater(os.path.getsize(fn(res, os.path.join(tmp, name))), 30000)
+
+
 class Closes(unittest.TestCase):
     """지수 종가: 야후 값을 먼저 쓰고, 없으면 수집기가 적어 둔 표를 쓴다."""
 
