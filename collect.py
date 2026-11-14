@@ -11,9 +11,19 @@ claude.ai 클라우드 루틴(매일 07:30 KST)이 실행하는 스크립트이�
 --------------
 - 날짜 라벨: '마지막으로 종가가 확정된 NYSE 세션'을 기준으로 정한다.
   (세션 실제 마감시각(조기폐장이면 13:00) + 15분 버퍼 이전이면 당일 제외)
-  CBOE 지연시세는 항상 직전 마감 세션의 스냅샷이므로 라벨과 내용이 일치한다.
 - 멱등성: 해당 날짜 아카이브가 이미 있으면 아무것도 하지 않는다.
   -> 주말·휴장일에 실행돼도 자동으로 'exists'로 끝난다(별도 휴장 체크 불필요).
+- 라벨과 내용의 일치 확인(2026-11 추가): 라벨만 맞고 내용이 다른 경우를 막는다.
+  1) 수집 가능 시간: 다음 거래일 정규장이 열린 뒤에는 수집하지 않는다(ERROR). 그때 받으면
+     다음 날 장중 자료에 전날 라벨이 붙는다. 야간 거래가 있는 지수 옵션(SPX·VIX·XSP)은
+     미 동부 20:15에 다음 세션 호가가 시작되므로 그 뒤에는 이 종목들만 뺀다.
+  2) 종목별 자료 시점: CBOE의 JSON 파일은 종목마다 만들어진 시각이 다르고, 몇 주 전
+     파일이 그대로 남아 있는 종목도 있다(실측 2026-11-13: KVUE 11-06, WBD 10-19 파일).
+     파일의 생성 시각(timestamp)과 기초자산 마지막 체결일을 보고, 그 세션이 열리기
+     전에 만들어진 파일은 저장하지 않는다. 그날 장중에 만들어진 파일은 저장하되 출력에
+     적는다. www.cboe.com 이 허용돼 있으면 CBOE 시세 페이지와 같은 갱신 요청을 먼저 보낸다.
+- 2차 시도: 일시 오류로 실패한 종목과, 응답이 비어 온 핵심 종목(지수·ETF)은 전체를
+  한 바퀴 돈 뒤 한 번 더 받는다. 끝까지 빠진 핵심 종목은 'WARN:' 줄로 알린다.
 - 부분 실패 보호: 성공 비율이 --min-ok-ratio(기본 0.9) 미만이면 아카이브를
   만들지 않고 실패(exit 1)로 끝낸다. 반쪽짜리 데이터가 커밋되면 멱등성 때문에
   그 날짜가 영영 재수집되지 않는 문제를 막는다.
@@ -46,7 +56,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -61,9 +71,17 @@ CONSTITUENTS_URL = ("https://raw.githubusercontent.com/datasets/"
 # 리다이렉트 목적지를 직접 호출하며, 클라우드 환경 허용 도메인에 cdn-api.cboe.com 이 필요하다.
 CBOE_URL = "https://cdn-api.cboe.com/api/global/delayed_quotes/options/{sym}.json"
 UA_HEADERS = {"User-Agent": "cboe-data-collector/1.0"}
+# CBOE 시세 페이지가 5분 넘게 묵은 JSON 파일을 만났을 때 보내는 갱신 요청(같은 주소·같은 방식).
+# 접수되면 몇 초 뒤 cdn-api 의 파일이 새로 만들어진다. www.cboe.com 이 허용 도메인에 없으면
+# 요청을 건너뛴다(수집 자체에는 지장이 없다).
+REFRESH_URL = "https://www.cboe.com/delayed_quote/api/options/{sym}"
+REFRESH_POLL_SEC = (4, 4, 6)      # 갱신 요청 뒤 새 파일을 기다리는 간격(실측: 접수되면 4~5초)
+REFRESH_MAX_PER_RUN = 30          # 한 번 실행에서 보내는 갱신 요청 상한(서버 부담 방지)
 
 # 세션 실제 마감시각(조기폐장이면 13:00 등) 이후 스냅샷 반영 여유(분).
 SNAPSHOT_BUFFER_MIN = 15
+# 전체를 한 바퀴 돈 뒤 실패 종목을 다시 받기 전에 쉬는 시간(초).
+RETRY_PASS_WAIT_SEC = 20
 
 # 연속 실패가 이 횟수에 도달하면 잠시 쉬어 서버 측 차단(레이트리밋)을 피한다.
 FAIL_STREAK_LIMIT = 5
@@ -81,6 +99,12 @@ CSV_COLUMNS = ["Symbol", "Expiry", "Type", "Strike", "Bid", "Ask", "Last",
 EXTRA_INDICES = ["SPX", "VIX", "NDX", "RUT", "DJX"]
 EXTRA_ETFS = ["SPY", "QQQ", "IWM", "DIA", "GLD", "SLV", "USO", "CPER", "IEF",
               "TLT", "XLF", "EEM", "FXY", "UUP", "PPLT", "PALL", "IBIT", "SOXX"]
+# 핵심 종목: 빈 응답(404/403)이 와도 '미상장'으로 넘기지 않고 다시 받아 본다.
+CORE_TICKERS = frozenset(EXTRA_INDICES + EXTRA_ETFS)
+# 야간 거래(GTH)가 있는 지수 옵션. 일~목 저녁 20:15(미 동부)에 다음 세션 호가가 시작된다.
+GTH_TICKERS = frozenset({"SPX", "VIX", "XSP"})
+# CBOE 고유 지수는 갱신 요청이 반영되지 않는다(실측). 요청을 보내지 않는다.
+NO_REFRESH_TICKERS = frozenset(EXTRA_INDICES + ["OEX", "XSP"])
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cboe_collect")
@@ -175,6 +199,73 @@ def completed_session_date(now_et=None):
     if not dates:
         raise RuntimeError("최근 2주 내 NYSE 세션을 찾지 못했다")
     return dates[-1].strftime("%Y%m%d")
+
+
+def snapshot_window(date, now_et=None):
+    """세션 date의 '마감 스냅샷'을 지금도 받을 수 있는지 본다. 반환: (late_all, late_gth).
+
+    late_all: 다음 거래일 정규장이 이미 열렸다. 지금 받는 자료는 다음 날 장중 자료다.
+    late_gth: 야간 거래가 있는 지수 옵션(GTH_TICKERS)의 다음 세션 호가가 이미 시작됐다.
+              야간 거래는 일~목 저녁 20:15(미 동부)에 열린다(시세는 15분 지연).
+    """
+    if now_et is None:
+        now_et = datetime.now(ZoneInfo("US/Eastern"))
+    now = pd.Timestamp(now_et)
+    session = pd.Timestamp(date)
+    next_open = _NYSE.session_open(_NYSE.next_session(session)).tz_convert("US/Eastern")
+    d = session.date()
+    while d.weekday() not in (6, 0, 1, 2, 3):   # 일(6)·월~목(0~3) 저녁에만 열린다
+        d += timedelta(days=1)
+    gth_open = pd.Timestamp(datetime(d.year, d.month, d.day, 20, 15), tz="US/Eastern")
+    return (bool(now >= next_open),
+            bool(now >= gth_open + pd.Timedelta(minutes=SNAPSHOT_BUFFER_MIN)))
+
+
+# ---------------------------------------------------------------------------
+# 자료 시점: 받은 파일이 그 세션의 마감 스냅샷인가
+# ---------------------------------------------------------------------------
+
+def snapshot_time(data):
+    """CBOE JSON 파일이 만들어진 시각(UTC). 없거나 형식이 다르면 None."""
+    ts = str(data.get("timestamp") or "").strip().replace("T", " ")[:19]
+    try:
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def classify_snapshot(data, date):
+    """받은 파일이 세션 date의 마감 스냅샷인지 판정한다. 반환: (상태, 생성 시각 또는 None).
+
+    'ok'       마감+버퍼 뒤에 만들어진 파일. 생성 시각을 알 수 없을 때도 ok로 둔다.
+    'intraday' 그날 장중~마감 직후에 만들어진 파일(마감 스냅샷이 아니다).
+    'stale'    그 세션이 열리기 전에 만들어진 파일이거나, 기초자산의 마지막 체결일이
+               세션 날짜보다 앞선다(거래가 끊긴 종목). 다른 날 자료이므로 저장하지 않는다.
+    """
+    gen = snapshot_time(data)
+    last = str((data.get("data") or {}).get("last_trade_time") or "")[:10].replace("-", "")
+    if len(last) == 8 and last.isdigit() and last < date:
+        return "stale", gen
+    if gen is None:
+        return "ok", None
+    try:
+        session = pd.Timestamp(date)
+        opened, closed = _NYSE.session_open(session), _NYSE.session_close(session)
+    except Exception:
+        return "ok", gen  # 세션이 아닌 날짜(수동 지정 등)는 판정하지 않는다
+    g = pd.Timestamp(gen)
+    if g < opened:
+        return "stale", gen
+    if g < closed + pd.Timedelta(minutes=SNAPSHOT_BUFFER_MIN):
+        return "intraday", gen
+    return "ok", gen
+
+
+def _et_label(gen):
+    """생성 시각을 '11-13 15:49 ET' 꼴로. 모르면 '생성 시각 불명'."""
+    if gen is None:
+        return "생성 시각 불명"
+    return gen.astimezone(ZoneInfo("US/Eastern")).strftime("%m-%d %H:%M ET")
 
 
 # ---------------------------------------------------------------------------
@@ -299,30 +390,118 @@ def fetch_json(url, max_retries=2, _sleep=time.sleep):
     raise last_err
 
 
+def request_refresh(ticker, timeout=10):
+    """CBOE에 JSON 파일을 새로 만들어 달라고 요청한다(시세 페이지가 보내는 것과 같은 요청).
+
+    반환: True(접수됨) / False(CBOE가 거절 - 거래가 끊긴 종목은 400을 준다) /
+          None(요청을 보내지 못함 - 시간 초과 등 접속 문제).
+    환경이 www.cboe.com 접속을 막으면 EgressBlockedError.
+    """
+    req = urllib.request.Request(REFRESH_URL.format(sym=urllib.parse.quote(ticker)),
+                                 headers=UA_HEADERS)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            resp.read()
+        return True
+    except urllib.error.HTTPError as e:
+        if e.code == 403 and e.headers and e.headers.get("x-deny-reason"):
+            raise _egress_blocked(_final_host(req), f"x-deny-reason={e.headers['x-deny-reason']}")
+        return False
+    except Exception as e:
+        if _is_proxy_connect_403(e):
+            raise _egress_blocked(_final_host(req), "프록시 CONNECT 403") from e
+        return None
+
+
 # ---------------------------------------------------------------------------
 # 수집·아카이브
 # ---------------------------------------------------------------------------
 
-def collect(tickers, date, root_dir, sleep=0.3, max_retries=2):
+def collect(tickers, date, root_dir, sleep=0.3, max_retries=2, report=None):
     """티커별 CSV를 root_dir/quotes_<date>/<TICKER>/ 아래에 쓴다.
 
-    반환: (성공 목록, 미상장 목록, 실패 [(티커, 오류)] 목록)
+    반환: (성공 목록, 자료 없음 목록, 실패 [(티커, 오류)] 목록)
+    '자료 없음'은 옵션 미상장·빈 응답, 그리고 다른 날 자료라 저장하지 않은 종목(stale)이다.
+    report(dict)를 넘기면 세부 내역을 채운다.
+      stale, intraday: [(티커, 파일 생성 시각)]   refreshed, retried, core_missing: [티커]
+      refresh_blocked: 갱신 요청 주소(www.cboe.com)가 환경에서 막혀 있었는지
     """
     ok, no_data, failed = [], [], []
+    rep = report if report is not None else {}
+    for key in ("stale", "intraday", "refreshed", "retried", "core_missing"):
+        rep.setdefault(key, [])
+    rep.setdefault("refresh_blocked", False)
+    stale, intraday = {}, {}
+    pause = time.sleep if sleep else (lambda s: None)
+    refresh = {"on": True, "left": REFRESH_MAX_PER_RUN, "unreachable": 0}
+
+    def refreshed_data(t, url):
+        """낡은 파일이면 갱신을 요청하고 새 파일을 기다린다. 마감 스냅샷을 받으면 그 JSON, 아니면 None."""
+        if not refresh["on"] or refresh["left"] <= 0 or t in NO_REFRESH_TICKERS:
+            return None
+        refresh["left"] -= 1
+        try:
+            accepted = request_refresh(t)
+        except EgressBlockedError:
+            refresh["on"], rep["refresh_blocked"] = False, True
+            return None
+        if accepted is None:  # 접속 문제가 두 번 이어지면 이번 실행에서는 더 보내지 않는다
+            refresh["unreachable"] += 1
+            if refresh["unreachable"] >= 2:
+                refresh["on"] = False
+            return None
+        if not accepted:
+            return None
+        for wait in REFRESH_POLL_SEC:
+            pause(wait)
+            try:
+                data = fetch_json(url, max_retries=0)
+            except Exception:
+                continue
+            if classify_snapshot(data, date)[0] == "ok" and rows_from(data, t):
+                return data
+        return None
+
+    def fetch_one(t):
+        """한 종목을 받아 저장한다. 반환 'ok' 또는 'no_data'. 실패는 예외로 올린다."""
+        url = CBOE_URL.format(sym=urllib.parse.quote(get_api_symbol(t)))
+        data = fetch_json(url, max_retries=max_retries)
+        rows = rows_from(data, t)
+        if not rows:
+            return "no_data"
+        status, gen = classify_snapshot(data, date)
+        if status != "ok":
+            newer = refreshed_data(t, url)
+            if newer is not None:
+                data, rows, status = newer, rows_from(newer, t), "ok"
+                rep["refreshed"].append(t)
+        if status == "stale":
+            stale[t] = _et_label(gen)   # 다른 날 자료: 저장하지 않는다
+            return "no_data"
+        if status == "intraday":
+            intraday[t] = _et_label(gen)  # 그날 자료지만 마감 스냅샷은 아니다: 저장하고 알린다
+        _write_ticker_csv(root_dir, date, t, rows)
+        return "ok"
+
     streak = 0
     total = len(tickers)
+    retry = []  # 한 바퀴 돈 뒤 다시 받아 볼 종목
     for i, t in enumerate(tickers):
-        url = CBOE_URL.format(sym=urllib.parse.quote(get_api_symbol(t)))
         try:
-            rows = rows_from(fetch_json(url, max_retries=max_retries), t)
-            if not rows:
-                no_data.append(t)
-            else:
-                _write_ticker_csv(root_dir, date, t, rows)
+            if fetch_one(t) == "ok":
                 ok.append(t)
+            elif t in CORE_TICKERS:
+                retry.append(t)  # 핵심 종목의 빈 응답은 미상장이 아니라 일시 문제로 본다
+                failed.append((t, "핵심 종목인데 자료 없음"))
+            else:
+                no_data.append(t)
             streak = 0
         except NoDataError:
-            no_data.append(t)  # 옵션 미상장(404/403)은 정상 분류
+            if t in CORE_TICKERS:
+                retry.append(t)
+                failed.append((t, "핵심 종목인데 자료 없음(404/403)"))
+            else:
+                no_data.append(t)  # 옵션 미상장(404/403)은 정상 분류
             streak = 0
         except Exception as e:
             # 환경 차단은 전체 즉시 중단. 단 이미 성공이 있으면 호스트가 허용돼 있다는
@@ -330,6 +509,7 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2):
             if isinstance(e, EgressBlockedError) and not ok:
                 raise
             failed.append((t, str(e)[:120]))
+            retry.append(t)
             streak += 1
             logger.warning(f"실패 {t}: {e}")
             if streak >= FAIL_STREAK_LIMIT:
@@ -345,6 +525,30 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2):
             time.sleep(sleep)
         if (i + 1) % 100 == 0:
             print(f"  ... {i + 1}/{total} (ok {len(ok)})", flush=True)
+
+    # 2차 시도: 성공이 하나라도 있으면(= 접속 자체는 된다) 실패 종목을 한 번 더 받는다.
+    if retry and ok:
+        print(f"  2차 시도: {len(retry)}개 ({', '.join(retry[:20])})", flush=True)
+        pause(RETRY_PASS_WAIT_SEC)
+        failed = []
+        for t in retry:
+            try:
+                if fetch_one(t) == "ok":
+                    ok.append(t)
+                    rep["retried"].append(t)
+                else:
+                    no_data.append(t)
+            except NoDataError:
+                no_data.append(t)
+            except Exception as e:
+                failed.append((t, str(e)[:120]))
+                logger.warning(f"2차 시도 실패 {t}: {e}")
+            if sleep:
+                time.sleep(sleep)
+
+    rep["stale"], rep["intraday"] = sorted(stale.items()), sorted(intraday.items())
+    got = set(ok)
+    rep["core_missing"] = [t for t in tickers if t in CORE_TICKERS and t not in got]
     return ok, no_data, failed
 
 
@@ -400,6 +604,8 @@ def main(argv=None):
                     help="요청당 재시도 횟수(0이어도 최초 1회는 시도)")
     ap.add_argument("--min-ok-ratio", type=float, default=0.9,
                     help="성공/전체 가 이 값 미만이면 아카이브 생성 안 함")
+    ap.add_argument("--allow-late", action="store_true",
+                    help="다음 거래일 장이 열린 뒤에도 수집(라벨과 내용이 어긋날 수 있음)")
     args = ap.parse_args(argv)
 
     date = completed_session_date()
@@ -409,17 +615,33 @@ def main(argv=None):
         print(f"exists: {archive} - nothing to do")
         return 0
 
+    # 수집 가능 시간 검사(전체 수집일 때만. 지정 티커 모드는 테스트용이라 건너뛴다).
+    skipped_gth = []
     if args.tickers:
         tickers, source = [normalize_ticker(t) for t in args.tickers], "manual"
     else:
+        try:
+            late_all, late_gth = snapshot_window(date)
+        except Exception as e:  # 달력 범위 밖 등: 검사를 못 하면 막지 않는다
+            logger.warning(f"수집 가능 시간 검사 실패({e}) -> 검사 없이 진행")
+            late_all = late_gth = False
+        if late_all and not args.allow_late:
+            print(f"ERROR: 수집 가능 시간이 지났다 - {date} 세션 다음 거래일의 정규장이 이미 열려, "
+                  f"지금 받으면 다음 날 장중 자료에 {date} 라벨이 붙는다. 아카이브를 만들지 않음 "
+                  f"(--allow-late 로 강제)")
+            return 1
         tickers, source = build_universe(sp500_only=args.sp500_only)
+        if late_gth and not args.allow_late:
+            skipped_gth = [t for t in tickers if t in GTH_TICKERS]
+            tickers = [t for t in tickers if t not in GTH_TICKERS]
     print(f"수집 시작: {len(tickers)}개 티커 (S&P500 출처: {source}), 날짜 {date}")
 
+    report = {}
     tmp_root = tempfile.mkdtemp(prefix="cboe_")
     try:
         try:
-            ok, no_data, failed = collect(tickers, date, tmp_root,
-                                          sleep=args.sleep, max_retries=args.max_retries)
+            ok, no_data, failed = collect(tickers, date, tmp_root, sleep=args.sleep,
+                                          max_retries=args.max_retries, report=report)
         except (EgressBlockedError, SystemicFailureError) as e:
             print(f"ERROR: {e}")
             return 1
@@ -440,8 +662,28 @@ def main(argv=None):
     size_mb = os.path.getsize(archive) / 1e6
     print(f"OK: {archive} ({size_mb:.1f} MB) - ok {len(ok)}, "
           f"no_data {len(no_data)}, fail {len(failed)}, date {date}")
-    if no_data:
-        print(f"  옵션 미상장/빈 응답: {', '.join(no_data)}")
+    stale_names = {t for t, _ in report.get("stale", [])}
+    unlisted = [t for t in no_data if t not in stale_names]
+    if unlisted:
+        print(f"  옵션 미상장/빈 응답: {', '.join(unlisted)}")
+    if report.get("stale"):
+        print("  다른 날 자료라 저장하지 않음(파일 생성 시각): "
+              + ", ".join(f"{t}({g})" for t, g in report["stale"]))
+    if report.get("intraday"):
+        print("  마감 전에 만들어진 파일이라 마감 스냅샷이 아님(저장은 함): "
+              + ", ".join(f"{t}({g})" for t, g in report["intraday"]))
+    if report.get("refreshed"):
+        print(f"  갱신 요청으로 새 파일을 받음: {', '.join(report['refreshed'])}")
+    if report.get("retried"):
+        print(f"  2차 시도로 받음: {', '.join(report['retried'])}")
+    if failed:
+        print("  실패: " + ", ".join(f"{t}({err})" for t, err in failed[:20]))
+    if report.get("refresh_blocked"):
+        print("  참고: www.cboe.com 이 허용 도메인에 없어 낡은 파일의 갱신 요청은 보내지 못했다")
+    if skipped_gth:
+        print(f"WARN: 야간 거래가 이미 시작돼 마감 스냅샷이 아니므로 제외 - {', '.join(skipped_gth)}")
+    if report.get("core_missing"):
+        print(f"WARN: 핵심 종목 누락 - {', '.join(report['core_missing'])}")
     return 0
 
 
