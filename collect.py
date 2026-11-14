@@ -32,6 +32,12 @@ claude.ai 클라우드 루틴(매일 07:30 KST)이 실행하는 스크립트이�
   403으로 거부 = URLError 'Tunnel connection failed: 403')은 환경설정 오류이므로,
   아직 성공이 하나도 없으면 막힌 호스트 이름과 함께 즉시 중단한다.
 - 원자적 쓰기: 아카이브는 .tmp에 만든 뒤 os.replace()로 교체한다.
+- 곁들이는 표(2026-11 추가): 수집을 마치면 data/daily/ 아래 표 두 개에 그날 줄을 넣는다. 루틴이
+  data/daily/ 를 통째로 커밋하므로 아카이브와 함께 올라간다.
+    index_closes.csv  지수 종가(SPX·VIX). CBOE 파일에 적힌 기초자산 현재가에서 얻는다.
+    gex_history.csv   SPX 감마 노출(GEX) 추이. gex.py 를 따로 띄워 계산한다.
+  둘 다 'OK:' 줄을 찍은 뒤에 하고, 실패하거나 시간이 걸려도(상한 90초) 수집 결과와 종료 코드는
+  바뀌지 않는다. --no-derived 로 끌 수 있고, 지정 티커 모드(--tickers)에서는 하지 않는다.
 - 점 티커: CBOE는 클래스주를 점 표기(BRK.B, BF.B) 그대로 받는다(실측 검증).
   옵션 심볼(OSI)은 뿌리 길이가 가변이므로 반드시 꼬리 고정폭으로 파싱한다.
 
@@ -49,6 +55,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -105,6 +112,15 @@ CORE_TICKERS = frozenset(EXTRA_INDICES + EXTRA_ETFS)
 GTH_TICKERS = frozenset({"SPX", "VIX", "XSP"})
 # CBOE 고유 지수는 갱신 요청이 반영되지 않는다(실측). 요청을 보내지 않는다.
 NO_REFRESH_TICKERS = frozenset(EXTRA_INDICES + ["OEX", "XSP"])
+
+# 수집에 곁들여 갱신하는 표(out_dir 아래). 실패해도 수집에는 영향을 주지 않는다.
+CLOSES_FILE = "index_closes.csv"   # 지수 종가(날짜별 한 줄)
+GEX_FILE = "gex_history.csv"       # SPX 감마 노출 추이(날짜별 한 줄). gex.py 가 계산한다
+# 지수는 장 마감 뒤 CBOE 파일의 current_price 가 공식 종가와 같다(실측 2026-11-13 19:07 ET:
+# SPX 7561.67, VIX 19.30 = 야후 종가). 주식·ETF는 시간외 체결가가 들어 있어 종가가 아니므로 쓰지 않는다.
+CLOSE_TICKERS = ("SPX", "VIX")
+DERIVED_TIMEOUT_SEC = 90           # gex.py 실행 상한(평소 5초 안팎)
+DERIVED_LOOKBACK = 5               # 추이 표에 빠진 날이 있으면 최근 며칠까지 함께 채울지
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("cboe_collect")
@@ -268,6 +284,15 @@ def _et_label(gen):
     return gen.astimezone(ZoneInfo("US/Eastern")).strftime("%m-%d %H:%M ET")
 
 
+def underlying_price(data):
+    """CBOE JSON에 적힌 기초자산 현재가. 없거나 숫자가 아니거나 0 이하면 None."""
+    try:
+        px = float((data.get("data") or {}).get("current_price"))
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return px if px == px and 0 < px < float("inf") else None
+
+
 # ---------------------------------------------------------------------------
 # 옵션 심볼(OSI) 파싱 — 꼬리 고정폭 방식
 # ---------------------------------------------------------------------------
@@ -425,12 +450,14 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2, report=None):
     report(dict)를 넘기면 세부 내역을 채운다.
       stale, intraday: [(티커, 파일 생성 시각)]   refreshed, retried, core_missing: [티커]
       refresh_blocked: 갱신 요청 주소(www.cboe.com)가 환경에서 막혀 있었는지
+      closes: {지수 티커: 종가}  CLOSE_TICKERS 가운데 마감 스냅샷으로 확인된 파일에 적힌 현재가
     """
     ok, no_data, failed = [], [], []
     rep = report if report is not None else {}
     for key in ("stale", "intraday", "refreshed", "retried", "core_missing"):
         rep.setdefault(key, [])
     rep.setdefault("refresh_blocked", False)
+    rep.setdefault("closes", {})
     stale, intraday = {}, {}
     pause = time.sleep if sleep else (lambda s: None)
     refresh = {"on": True, "left": REFRESH_MAX_PER_RUN, "unreachable": 0}
@@ -481,6 +508,15 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2, report=None):
         if status == "intraday":
             intraday[t] = _et_label(gen)  # 그날 자료지만 마감 스냅샷은 아니다: 저장하고 알린다
         _write_ticker_csv(root_dir, date, t, rows)
+        # 지수 종가: 생성 시각으로 마감 스냅샷임이 확인된 파일에서만 적는다(장중 파일의 현재가는 종가가 아니다).
+        # CSV는 이미 저장됐으므로 여기서 무슨 일이 있어도 이 종목을 실패로 만들지 않는다.
+        try:
+            if t in CLOSE_TICKERS and status == "ok" and snapshot_time(data) is not None:
+                px = underlying_price(data)
+                if px is not None:
+                    rep["closes"][t] = px
+        except Exception:
+            pass
         return "ok"
 
     streak = 0
@@ -583,6 +619,80 @@ def make_archive(src_root, dest):
             os.remove(tmp)
 
 
+# ---------------------------------------------------------------------------
+# 곁들이는 표: 지수 종가, GEX 추이 (실패해도 수집에는 영향이 없다)
+# ---------------------------------------------------------------------------
+
+def save_index_closes(out_dir, date, closes):
+    """지수 종가 표에 date 줄을 넣는다(이미 있으면 받은 값만 바꾼다). 원자적으로 쓴다. 반환: 표의 줄 수."""
+    path = os.path.join(out_dir, CLOSES_FILE)
+    cols = ["date"] + [t.lower() for t in CLOSE_TICKERS] + ["source"]
+    rows = {}
+    if os.path.exists(path):
+        with open(path, newline="", encoding="utf-8") as f:
+            for r in csv.DictReader(f):
+                if r.get("date"):
+                    rows[r["date"]] = {c: (r.get(c) or "") for c in cols}
+    row = rows.get(date) or {c: "" for c in cols}
+    row["date"], row["source"] = date, "cboe"
+    for t in CLOSE_TICKERS:
+        if t in closes:
+            row[t.lower()] = f"{closes[t]:.2f}"
+    rows[date] = row
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w", newline="", encoding="utf-8") as f:
+            w = csv.DictWriter(f, fieldnames=cols, lineterminator="\n")
+            w.writeheader()
+            w.writerows(rows[d] for d in sorted(rows))
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return len(rows)
+
+
+def update_derived(out_dir, date, closes, timeout=DERIVED_TIMEOUT_SEC):
+    """수집을 마친 뒤 곁들이는 표 두 개를 갱신한다. 반환: 출력에 덧붙일 줄 목록.
+
+    어떤 경우에도 예외를 밖으로 내지 않는다. 수집 결과('OK:' 줄, 종료 코드)는 이 함수가 실패해도 그대로다.
+    GEX 추이는 gex.py 를 별도 프로세스로 띄워 계산한다(분석 스크립트의 오류·지연이 수집기로 넘어오지 않게).
+    SPX 종가를 적지 못한 날은 GEX 줄도 넣지 않는다(종가 없이 계산한 값이 표에 남지 않게).
+    """
+    lines = []
+    try:
+        if closes:
+            n = save_index_closes(out_dir, date, closes)
+            got = ", ".join(f"{t} {closes[t]:,.2f}" for t in CLOSE_TICKERS if t in closes)
+            lines.append(f"  지수 종가 표: {CLOSES_FILE} ({n}일) - {got}")
+    except Exception as e:
+        lines.append(f"  참고: 지수 종가 표를 갱신하지 못함({type(e).__name__}: {str(e)[:80]})")
+        return lines
+    script = os.path.join(BASE_DIR, "gex.py")
+    if "SPX" not in closes or not os.path.exists(script):
+        return lines
+    try:
+        out = os.path.abspath(out_dir)   # 아래에서 작업 폴더를 바꿔 띄우므로 절대 경로로 넘긴다
+        cmd = [sys.executable or "python3", script, "--archive-dir", out,
+               "--history-csv", os.path.join(out, GEX_FILE), "--save-history",
+               "--closes-csv", os.path.join(out, CLOSES_FILE), "--require-close",
+               "--no-yf", "--lookback", str(DERIVED_LOOKBACK)]
+        p = subprocess.run(cmd, cwd=BASE_DIR, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=timeout,
+                           env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        saved = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.startswith("추이 표:")]
+        if p.returncode == 0 and saved:
+            lines.append(f"  GEX {saved[-1]}")
+        else:
+            tail = ((p.stderr or "").strip() or (p.stdout or "").strip() or "출력 없음").splitlines()[-1][:100]
+            lines.append(f"  참고: GEX 추이 표를 갱신하지 못함(종료 코드 {p.returncode}: {tail})")
+    except subprocess.TimeoutExpired:
+        lines.append(f"  참고: GEX 추이 표를 갱신하지 못함({timeout}초 안에 끝나지 않음)")
+    except Exception as e:
+        lines.append(f"  참고: GEX 추이 표를 갱신하지 못함({type(e).__name__}: {str(e)[:80]})")
+    return lines
+
+
 def main(argv=None):
     # Windows 콘솔(cp949)에서 한글 출력이 깨지지 않도록 UTF-8로 재설정
     for stream in (sys.stdout, sys.stderr):
@@ -606,6 +716,8 @@ def main(argv=None):
                     help="성공/전체 가 이 값 미만이면 아카이브 생성 안 함")
     ap.add_argument("--allow-late", action="store_true",
                     help="다음 거래일 장이 열린 뒤에도 수집(라벨과 내용이 어긋날 수 있음)")
+    ap.add_argument("--no-derived", action="store_true",
+                    help="수집 뒤 지수 종가 표·GEX 추이 표를 갱신하지 않는다")
     args = ap.parse_args(argv)
 
     date = completed_session_date()
@@ -680,6 +792,14 @@ def main(argv=None):
         print("  실패: " + ", ".join(f"{t}({err})" for t, err in failed[:20]))
     if report.get("refresh_blocked"):
         print("  참고: www.cboe.com 이 허용 도메인에 없어 낡은 파일의 갱신 요청은 보내지 못했다")
+    # 곁들이는 표. 여기까지의 출력을 먼저 내보내 두고(이 단계에서 멈춰도 'OK:' 줄은 이미 나가 있다) 한다.
+    if not args.tickers and not args.no_derived:
+        sys.stdout.flush()
+        try:
+            for line in update_derived(args.out_dir, date, report.get("closes") or {}):
+                print(line)
+        except Exception as e:  # update_derived 가 예외를 내지 않게 돼 있지만 한 번 더 막는다
+            print(f"  참고: 곁들이는 표를 갱신하지 못함({type(e).__name__})")
     if skipped_gth:
         print(f"WARN: 야간 거래가 이미 시작돼 마감 스냅샷이 아니므로 제외 - {', '.join(skipped_gth)}")
     if report.get("core_missing"):
