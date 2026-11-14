@@ -390,8 +390,8 @@ def report(res):
 
 
 # ----------------------------------------------------------------------------- 그림
-C_POS, C_NEG = "#2a78d6", "#e34948"                                   # 양의 감마, 음의 감마(색각 이상 구분 검사를 통과한 파랑·빨강 쌍)
-C_MA = (("sma60", 60, "#eda100"),)                                    # 가격 차트의 이동평균선(이름, 일수, 색). 파랑·빨강 수준선과의 구분 검사를 통과한 노랑
+C_POS, C_NEG = "#2fbf71", "#ef5350"                                   # 양의 감마(콜 쪽)는 초록, 음의 감마(풋 쪽)는 빨강. 사용자 요청에 따른 색이며 적록 색각 이상에서는 구분이 어려울 수 있다
+C_MA = (("sma60", 60, "#eda100"),)                                    # 가격 차트의 이동평균선(이름, 일수, 색)
 DPI = 150
 GT = {
     "ko": {
@@ -484,7 +484,7 @@ class _Canvas:
         from matplotlib.patches import FancyBboxPatch
         from vix_decomp import SURF
         self.bg.add_patch(FancyBboxPatch((40, top), self.W - 80, height, boxstyle="round,pad=0,rounding_size=16", facecolor=SURF,
-                                         edgecolor="#0b0b0b24", lw=1.4 * self.pt))
+                                         edgecolor="#ffffff2e", lw=1.4 * self.pt))
 
     def line(self, xs, ys, color, lw=1.4, top=False, **kw):
         (self.fg if top else self.bg).plot(xs, ys, color=color, lw=lw * self.pt, **{"solid_capstyle": "butt", **kw})
