@@ -494,8 +494,8 @@ def report(res):
 
 
 # ----------------------------------------------------------------------------- 그림
-INK, INK2, MUTED, GRID, BASE, SURF, FILL = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#c3c2b7", "#fcfcfb", "#f0efec"
-C_PREV, C_TODAY = "#2a78d6", "#1baf7a"                              # 전일, 오늘(색각 이상 구분 검사를 통과한 조합)
+INK, INK2, MUTED, GRID, BASE, SURF, FILL = "#f3f2ee", "#bdbbb4", "#8f8d87", "#29292b", "#4a4a4d", "#0c0c0d", "#1f1f21"   # 검은 배경 테마(글자·선은 밝게, 바탕은 어둡게)
+C_PREV, C_TODAY = "#4c9bf0", "#2ecf8f"                              # 전일(파랑), 오늘(초록). 검은 배경에 맞춰 밝게 한 값
 TXT = {
     "ko": {"title": "VIX 분해", "sub": "SPX 옵션 마감 호가로 직접 계산한 값", "from": "시작일", "to": "종료일", "spx": "S&P 500", "vix": "VIX",
            "abs": "하루 변화(포인트)", "pct": "하루 변화(%)", "fac": "VIX 변화 요인", "total": "요인 합계",
@@ -621,7 +621,7 @@ def chart(res, path):
         return t.get_window_extent(fig.canvas.get_renderer()).width
 
     def card(top, height):
-        bg.add_patch(FancyBboxPatch((40, top), W - 80, height, boxstyle="round,pad=0,rounding_size=16", facecolor=SURF, edgecolor="#0b0b0b24", lw=1.4 * pt))
+        bg.add_patch(FancyBboxPatch((40, top), W - 80, height, boxstyle="round,pad=0,rounding_size=16", facecolor=SURF, edgecolor="#ffffff2e", lw=1.4 * pt))
 
     def rule(y, x0=70, x1=W - 70, color=BASE, lw=1.4):
         bg.plot([x0, x1], [y, y], color=color, lw=lw * pt, solid_capstyle="butt")
@@ -632,7 +632,7 @@ def chart(res, path):
     for i, (lab, d, fill) in enumerate(((L["from"], res.get("prev"), FILL), (L["to"], res["date"], SURF))):
         x = 40 + i * 330
         text(x, 152, lab, 20, INK2, "medium")
-        bg.add_patch(FancyBboxPatch((x, 166), 300, 60, boxstyle="round,pad=0,rounding_size=10", facecolor=fill, edgecolor="#0b0b0b2e", lw=1.4 * pt))
+        bg.add_patch(FancyBboxPatch((x, 166), 300, 60, boxstyle="round,pad=0,rounding_size=10", facecolor=fill, edgecolor="#ffffff3a", lw=1.4 * pt))
         text(x + 22, 206, _ymd(d) if d else "–", 25, INK2 if i == 0 else INK, "medium")
 
     # 표
