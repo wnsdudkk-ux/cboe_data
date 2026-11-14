@@ -345,7 +345,8 @@ def context(hist, key):
     past = past[~np.isnan(past)]
     out = {"now": float(v[-1]), "prev": float(v[-2]), "chg": float(d[-1])}
     if len(past) >= 8 and np.median(past) > 0:
-        out["x"] = float(abs(d[-1]) / np.median(past))
+        out["typ"] = float(np.median(past))
+        out["x"] = float(abs(d[-1]) / out["typ"])
     lv = v[~np.isnan(v)]
     if len(lv) >= 10:
         out["rank"], out["n"] = int((lv > v[-1]).sum()) + 1, int(len(lv))
@@ -451,8 +452,10 @@ def report(t, res, d0, d1):
     for tg in (30, 90):
         f = pr.get(f"fs{tg}")
         if f:
+            typ = (c.get(f"atm{tg}") or {}).get("typ")
             L.append(f"  [행사가 고정 {tg}일] 만기 {f['exp']}(잔존 {f['dte']}일) 선도가 {N(f['F0'])}→{N(f['F1'])}, 등가격 IV {P(f['atm0'], 2)}→{P(f['atm1'], 2)}"
-                     f" = 곡선 위 이동 {D(f['slide'])} + 행사가 고정 변화 {D(f['fixed'])}")
+                     f" = 곡선 위 이동 {D(f['slide'])} + 행사가 고정 변화 {D(f['fixed'])}"
+                     + (f" | 참고: {tg}일 등가격 IV의 평소 하루 변동폭 {typ * 100:.2f}%p" if typ else ""))
     L.append(f"  [같은 행사가 IV 변화 중앙값, 잔존 7~60일 외가격(델타 0.15~0.5)] 풋 {D(pr['fs_put'])} | 콜 {D(pr['fs_call'])}")
     for e in pr.get("decomp", []):
         L.append(f"  [가격 분해] {e['label']} {e['K']:g}: {N(e['mid0'])}→{N(e['mid1'])} ({e['chg']:+,.2f}) = 기초자산 {e['under']:+,.2f}"
