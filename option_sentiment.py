@@ -3,11 +3,12 @@
 """option_sentiment.py - cboe_data 일일 보관본에서 옵션 체인을 읽어 전 거래일 대비 변화를 계산한다.
 
 입력: data/daily/quotes_YYYYMMDD.tar.gz (압축을 풀지 않고 필요한 종목만 바로 읽는다)
-출력: 종목별 요약(터미널) + 전체 수치(JSON, --out-json)
-예:   python3 option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json
+출력: 종목별 요약(터미널) + 전체 수치(JSON, --out-json) + VIX 분해 그림(PNG, --vix-chart)
+예:   python3 option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json --vix-chart vix.png
       python3 option_sentiment.py --archive-dir data/daily --tickers QQQ --date 20261113   # 날짜 지정(수동)
 종료 코드: 0 분석함 / 3 오늘치 수집본 없음 / 4 휴장(새 자료 없음) / 1 오류
-필요: pandas, numpy (선택: exchange_calendars 휴장일 판정, yfinance 종가 대조)
+필요: pandas, numpy (선택: exchange_calendars 휴장일 판정, yfinance 종가 대조, matplotlib 그림)
+SPX가 분석 대상에 있으면 vix_decomp.py를 불러 SPX 호가로 VIX를 직접 계산하고 델타 구간별 기여와 전일 대비 변화 요인을 함께 낸다.
 
 계산 기준
 - IV는 파일의 IV 열을 그대로 쓰지 않고 마감 호가 중간값에서 직접 역산한다(Black-76, 달력 일수). 파일의 IV·델타는
@@ -523,6 +524,13 @@ def run(a):
     print(f"[비교] 오늘 {d1} vs 직전 수집본 {d0} (평일 기준 {gap}일 전, 달력 {days}일) / 추이 비교 {len(hist_dates)}일치({hist_dates[0]}~)")
     tickers = [t.upper() for t in a.tickers]
     hist, keep = {t: [] for t in tickers}, {}
+    vd = vstate = None
+    if "SPX" in tickers and not a.no_vix:                    # SPX 호가로 VIX를 직접 계산해 분해한다(vix_decomp.py)
+        try:
+            import vix_decomp as vd
+            vstate = vd.new_state({} if a.no_yf else vd.index_closes(hist_dates))
+        except Exception as e:
+            print(f"[확인 필요] VIX 분해 모듈을 불러오지 못함: {type(e).__name__}: {e}")
     for d in hist_dates:
         try:
             day = load_day(a.archive_dir, d, tickers)
@@ -535,6 +543,11 @@ def run(a):
                 hist[t].append(dict(h, date=d))
                 if d in (d0, d1):
                     keep[(t, d)] = (day[t], (sf, sm), day[t].attrs.get("fetched"))
+        if vstate is not None and "SPX" in day and len(day["SPX"]):
+            try:
+                vd.track(vstate, d, day["SPX"])
+            except Exception as e:
+                print(f"[확인 필요] {d} VIX 계산 중 오류: {type(e).__name__}: {e}")
     cl = {} if a.no_yf else closes(tickers, d0, d1)
     result = {"date": d1, "prev": d0, "gap_weekdays": gap, "lookback_days": len(hist_dates), "tickers": {}}
     for t in tickers:
@@ -570,6 +583,25 @@ def run(a):
                 res["flags"].append(f"호가 간격이 평소({np.median(sp) * 100:.1f}%)보다 넓음: {', '.join(wide)} - 이 종목의 IV 변화는 오차가 클 수 있음")
         result["tickers"][t] = res
         print(report(t, res, d0, d1))
+    if vstate is not None and vstate["last"] is not None:
+        try:
+            vres = vd.summary(vstate)
+            vres.setdefault("flags", [])
+            if vres.get("date") != d1:
+                vres["flags"].append(f"{d1} 보관본에서 SPX를 읽지 못해 {vres.get('date')} 기준으로 계산함")
+            elif vres.get("prev") != d0:
+                vres["flags"].append(f"{d0} 보관본에서 SPX를 읽지 못해 전일 비교가 {vres.get('prev') or '없음'} 기준임")
+            if gap > 1 and "factors" in vres:
+                vres["flags"].append(f"직전 수집본이 {gap}거래일 전 자료라 하루치 변화가 아님")
+            result["vix"] = vd.clean(vres)
+            print(vd.report(vres))
+            if a.vix_chart and "error" not in vres:
+                try:
+                    print(f"\nVIX 분해 그림: {vd.chart(vd.clean(vres), a.vix_chart)}")
+                except Exception as e:
+                    print(f"\n[확인 필요] VIX 분해 그림을 만들지 못함: {type(e).__name__}: {e}")
+        except Exception as e:
+            print(f"\n[확인 필요] VIX 분해를 정리하지 못함: {type(e).__name__}: {e}")
     if a.out_json:
         with open(a.out_json, "w", encoding="utf-8") as f:
             json.dump(clean(result), f, ensure_ascii=False, indent=1)
@@ -630,6 +662,8 @@ def main():
     p.add_argument("--date", help="분석 기준일 YYYYMMDD(생략하면 최신 보관본. 생략 시 휴장·수집 누락을 점검한다)")
     p.add_argument("--lookback", type=int, default=20, help="추이 비교에 쓸 과거 수집일 수(폴더에 있는 만큼만 쓴다)")
     p.add_argument("--out-json")
+    p.add_argument("--vix-chart", help="VIX 분해 그림(PNG)을 저장할 경로. SPX가 분석 대상일 때만 만든다")
+    p.add_argument("--no-vix", action="store_true", help="VIX 직접 계산·분해를 하지 않음")
     p.add_argument("--no-yf", action="store_true", help="야후 종가 대조를 하지 않음")
     p.add_argument("--force", action="store_true", help="휴장·수집 누락이어도 최신 보관본으로 분석")
     return run(p.parse_args())

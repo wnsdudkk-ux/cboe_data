@@ -1,0 +1,8 @@
+# 분석 스크립트(option_sentiment.py, vix_decomp.py)용. 수집 루틴은 requirements.txt만 있으면 된다.
+pandas>=2.1
+numpy>=1.26
+tzdata>=2024.1
+# 아래는 없어도 돈다(해당 기능만 빠진다)
+exchange_calendars>=4.5   # 휴장일·조기 폐장일 판정
+yfinance>=0.2.40          # S&P 500·VIX 등 종가 대조
+matplotlib>=3.8           # VIX 분해 그림
