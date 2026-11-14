@@ -39,7 +39,7 @@ pip install -r requirements.txt
 python collect.py                # 이미 오늘치가 있으면 'exists' 출력 후 종료
 python collect.py --force        # 재수집
 python collect.py --tickers BRK.B NVR --out-dir /tmp/t   # 테스트
-python -m unittest discover -s tests                      # 단위테스트 (75개)
+python -m unittest discover -s tests                      # 단위테스트 (76개)
 ```
 
 출력 규약: `OK:`(성공) / `exists:`(할 일 없음) / `ERROR:`(성공률 미달·수집 가능 시간
@@ -136,6 +136,13 @@ python vix_decomp.py --from-json out.json --png vix.png                         
 
 구간의 몫 = 그 구간 옵션이 VIX에 실제로 기여한 포인트 − 곡선이 평평했다면(모든 행사가의
 IV가 등가격 IV와 같다면) 기여했을 포인트. 네 몫을 더하면 그날의 'VIX − 등가격 IV'가 된다.
+
+풋 쪽 두 요인의 합과 콜 쪽 두 요인의 합은 등가격 IV 변화(앞의 두 요인의 합)에 딸려
+움직인다. VIX가 등가격 IV보다 크게 움직이기 때문이다. 85개 날짜 쌍에서 풋 쪽은 등가격 IV
+변화의 +0.62배(상관 0.89), 콜 쪽은 −0.32배(상관 −0.93)였다. 그래서 글 보고에는 이
+관계(0.6배, −0.3배)에서 벗어난 몫을 `[풋 쪽·콜 쪽 요인의 평소 관계]` 줄에 따로 적는다.
+풋 쪽이 이 관계보다 뚜렷이 높은 날이 등가격에 견줘 풋이 더 비싸진 날이다(예: 2026-10-16,
+관계보다 +1.74).
 
 **Cboe 도구와의 대조** (2026-11-04→11-05, VIX 16.61→28.18)
 

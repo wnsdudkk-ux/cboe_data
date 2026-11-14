@@ -49,6 +49,9 @@ NB = 10                                # 델타 5단위 구간 수(한쪽)
 ATM_STEP = 25.0                        # 등가격 행사가를 고를 때 쓰는 행사가 단위
 FACTORS = ["sticky", "parallel", "put_skew", "call_skew", "down_conv", "up_conv"]
 REGION = {"put_skew": "put_body", "call_skew": "call_body", "down_conv": "put_wing", "up_conv": "call_wing"}
+# 풋 쪽(풋 스큐+하방 볼록성)·콜 쪽(콜 스큐+상방 볼록성) 요인이 등가격 IV 변화(곡선 따라 이동+평행 이동)에 딸려 움직이는 비율.
+# 2026-07-06~11-13의 85개 날짜 쌍에서 풋 쪽 +0.62배(상관 0.89), 콜 쪽 -0.32배(상관 -0.93)였다
+SIDE_BETA = {"put": 0.6, "call": -0.3}
 NAN = float("nan")
 
 
@@ -410,6 +413,15 @@ def summary(state):
                 typ[k] = float(np.median(past))
         if typ:
             out["factor_typ"], out["factor_typ_n"] = typ, int(sum(1 for r in rows[:-1] if "sticky" in r))
+        # 풋 쪽·콜 쪽 요인은 등가격 IV 변화에 딸려 움직인다(VIX가 등가격 IV보다 크게 움직이기 때문). 그 관계에서 벗어난 몫을 따로 낸다
+        atm = f["sticky"] + f["parallel"]
+        past = np.array([(r["sticky"] + r["parallel"], r["put_skew"] + r["down_conv"], r["call_skew"] + r["up_conv"]) for r in rows[:-1] if "sticky" in r], float)
+        side = {"atm": atm, "n": int(len(past))}
+        for name, col, today in (("put", 1, f["put_skew"] + f["down_conv"]), ("call", 2, f["call_skew"] + f["up_conv"])):
+            side[name] = {"today": today, "beta": SIDE_BETA[name], "usual": SIDE_BETA[name] * atm, "excess": today - SIDE_BETA[name] * atm}
+            if len(past) >= 8:
+                side[name]["typ"] = float(np.median(np.abs(past[:, col] - SIDE_BETA[name] * past[:, 0])))
+        out["side"] = side
         if abs(f["resid"]) > 1e-6:
             out["flags"].append(f"요인 합계가 VIX 변화와 {f['resid']:+.4f} 어긋남")
     return out
@@ -457,6 +469,13 @@ def report(res):
         L.append(f"  [VIX 변화 {res['chg']:+.2f}의 요인] " + " | ".join(f"{NAMES[k]} {f[k]:+.2f}" for k in FACTORS) + f" | 합 {sum(f.values()):+.2f}")
         if "factor_typ" in res:
             L.append(f"    평소 크기(최근 {res['factor_typ_n']}번 변화의 절댓값 중앙값): " + " | ".join(f"{NAMES[k]} {v:.2f}" for k, v in res["factor_typ"].items()))
+        if "side" in res:
+            sd = res["side"]
+            typ = (f", 평소 벗어나는 크기 {sd['put']['typ']:.2f}", f", 평소 벗어나는 크기 {sd['call']['typ']:.2f}") if "typ" in sd["put"] else ("", "")
+            L.append(f"  [풋 쪽·콜 쪽 요인의 평소 관계] 등가격 IV 변화(곡선 따라 이동+평행 이동) {sd['atm']:+.2f}에 평소라면 "
+                     f"풋 쪽(풋 스큐+하방 볼록성) {sd['put']['usual']:+.2f}, 콜 쪽(콜 스큐+상방 볼록성) {sd['call']['usual']:+.2f}"
+                     f" | 오늘 풋 쪽 {sd['put']['today']:+.2f}(평소 관계보다 {sd['put']['excess']:+.2f}{typ[0]}),"
+                     f" 콜 쪽 {sd['call']['today']:+.2f}(평소 관계보다 {sd['call']['excess']:+.2f}{typ[1]})")
         L.append(f"  [등가격] 행사가 {a['strike_prev']:,.0f} → {a['strike']:,.0f} | 30일 곡선의 등가격 IV {a['iv_prev']:.2f}% → {a['iv']:.2f}%"
                  f" (어제 곡선에서 오늘 등가격 행사가의 IV {a['iv_prev_at_new']:.2f}%)")
         for lab, key, v, at in (("오늘", "premium", res["vix"], a["iv"]), ("전일", "premium_prev", res["vix_prev"], a["iv_prev"])):

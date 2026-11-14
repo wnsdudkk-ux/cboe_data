@@ -82,6 +82,28 @@ class Helpers(unittest.TestCase):
         self.assertIn("error", vd.cboe_factors(lv, lv, float("nan"), 5000.0))
         self.assertIn("범위 밖", vd.cboe_factors(lv, lv, 5000.0, 7000.0)["error"])
 
+    def test_report_separates_usual_side_move_from_excess(self):
+        # 등가격 IV 변화 +2.0에 풋 쪽 +1.2(0.6배), 콜 쪽 -0.6(-0.3배)이 평소 관계. 그보다 풋 쪽이 +0.5 큰 날
+        rows = [{"date": f"d{i}", "vix": 20.0, "sticky": 0.5, "parallel": 0.5, "put_skew": 0.3, "down_conv": 0.4, "call_skew": -0.3, "up_conv": 0.0}
+                for i in range(9)]
+        lv = {"date": "20261113", "vix": 21.0, "var": 0.0441, "bins": np.full((2, vd.NB), 0.0441 / 20), "a": (0.6, 0.4), "curve": None,
+              "terms": [{"exp": __import__("pandas").Timestamp("2026-12-11"), "root": "SPXW", "minutes": 28 * 1440, "sigma2": 0.04, "F": 5000.0, "K0": 5000.0,
+                         "n_put": 10, "n_call": 10, "k_lo": 4000.0, "k_hi": 6000.0, "iv_nan": 0, "k0_shift": False}] * 2}
+        f = {"sticky": 1.2, "parallel": 0.8, "put_skew": 0.7, "down_conv": 1.0, "call_skew": -0.5, "up_conv": -0.1, "resid": 0.0,
+             "atm": {"strike_prev": 5000.0, "strike": 4950.0, "iv_prev": 15.0, "iv_prev_at_new": 16.2, "iv": 17.0},
+             "premium": {k: 0.0 for k in vd.FACTORS[2:]}, "premium_prev": {k: 0.0 for k in vd.FACTORS[2:]}}
+        prev = dict(lv, date="20261112", vix=18.0, curve=(np.array([4000.0, 6000.0]), np.array([0.3, 0.1])))
+        lv = dict(lv, curve=(np.array([4000.0, 6000.0]), np.array([0.32, 0.12])))
+        st = {"rows": rows + [dict(rows[0], date="20261113", **{k: f[k] for k in vd.FACTORS})], "closes": {},
+              "last": {"date": "20261113", "level": lv, "factors": f, "spot": 4950.0, "close": {},
+                       "prev": {"date": "20261112", "lv": prev, "spot": 5000.0, "close": {}}}}
+        res = vd.summary(st)
+        self.assertAlmostEqual(res["side"]["put"]["usual"], 1.2)
+        self.assertAlmostEqual(res["side"]["put"]["excess"], 0.5)
+        self.assertAlmostEqual(res["side"]["call"]["excess"], 0.0)
+        self.assertAlmostEqual(res["side"]["put"]["typ"], 0.1)            # 과거 9번: 0.7 - 0.6 x 1.0
+        self.assertIn("평소 관계보다 +0.50", vd.report(res))
+
     def test_ticks_cover_range_with_round_steps(self):
         t, step = vd._ticks(0.0, 4.9)
         self.assertEqual(t, [0.0, 2.0, 4.0])
