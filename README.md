@@ -39,11 +39,61 @@ pip install -r requirements.txt
 python collect.py                # 이미 오늘치가 있으면 'exists' 출력 후 종료
 python collect.py --force        # 재수집
 python collect.py --tickers BRK.B NVR --out-dir /tmp/t   # 테스트
-python -m unittest discover -s tests                      # 단위테스트 (35개)
+python -m unittest discover -s tests                      # 단위테스트 (36개)
 ```
 
 출력 규약: `OK:`(성공) / `exists:`(할 일 없음) / `ERROR:`(성공률 미달 — 아카이브
 미생성, 커밋 금지). 종료코드 0/0/1.
+
+## 전일 대비 분석 — option_sentiment.py
+
+쌓인 보관본 두 날짜(최신과 그 직전 수집일)를 비교해 옵션 시장이 하루 사이 어떻게
+달라졌는지 수치로 뽑는다. 압축을 풀지 않고 필요한 종목의 CSV만 바로 읽는다.
+claude.ai 예약 작업(화~토 아침 KST)이 이 스크립트를 받아 실행한다.
+
+```bash
+# 저장소 전체(1.5GB 이상)를 받지 않고 스크립트와 최근 21일치 보관본만 받는다 (약 380MB, 20초)
+git clone --depth 1 --filter=blob:none --no-checkout https://github.com/wnsdudkk-ux/cboe_data.git && cd cboe_data
+git checkout HEAD -- option_sentiment.py $(git ls-tree -r --name-only HEAD data/daily | grep -E 'quotes_[0-9]{8}\.tar\.gz$' | sort | tail -21)
+pip install pandas numpy exchange_calendars yfinance      # 뒤의 둘은 선택(휴장일 판정, 종가 대조)
+python option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json
+python option_sentiment.py --archive-dir data/daily --tickers QQQ --date 20261113   # 날짜 지정
+python option_sentiment.py --self-test                     # 접속 없이 계산 로직 점검
+```
+
+`git ls-tree -l`처럼 파일 크기를 묻는 명령은 모든 보관본을 내려받게 만드니 쓰지 않는다.
+종료 코드: `0` 분석함 / `3` 오늘치 보관본 없음 / `4` 휴장(최근 24시간 안에 마감한 거래일
+없음) / `1` 오류. `--date`를 주면 휴장·누락 점검을 건너뛴다.
+
+**계산하는 것** (종목별, 직전 수집일 대비 변화와 최근 20수집일 안에서의 위치)
+
+- 기초자산 수준(풋-콜 패리티로 구한 선도가)과 선도가 곡선(VIX에서는 선물 곡선에 해당)
+- 등가격 IV(잔존 7·30·90·180일로 환산), 기간구조(7일−30일, 30일−90일)
+- 스큐(25델타 풋 IV − 콜 IV), 꼬리(10델타 IV − 등가격 IV)
+- 행사가 고정 IV 변화: 등가격 IV 변화를 "기초자산이 움직여 곡선 위에서 옮겨 간 몫"과
+  "같은 행사가의 IV가 실제로 바뀐 몫"으로 나눈다
+- 옵션 가격 변화 분해: 25델타 풋·콜과 등가격 스트래들의 가격 변화 =
+  기초자산(델타·감마) + IV(베가) + 시간(세타) + 나머지
+- 거래량·거래대금·미결제약정의 풋÷콜 비율, 미결제약정이 크게 늘거나 준 계약
+- 감마 노출 추정(딜러가 콜은 매수, 풋은 매도 포지션이라는 관행적 가정), 호가 스프레드
+
+**계산 기준에서 알아 둘 것**
+
+- IV는 파일의 `IV` 열을 쓰지 않고 마감 호가 중간값에서 직접 역산한다(Black-76, 달력
+  일수). 파일의 `IV`·`Delta`는 Cboe가 수집 시각의 기초자산 추정치로 다시 계산한 값이어서
+  마감 호가와 어긋나는 날이 있다. 2026-10-23~11-13(16거래일)의 SPX 30일 등가격 IV로
+  대조하니 두 값의 차이는 중앙값 0.05%p였지만 11-13에는 0.34%p였고, 하루 변화를 VIX
+  종가 변화에 맞춰 보면 호가 기준이 더 잘 맞았다(잔차 표준편차 0.19 대 0.32 VIX포인트,
+  표본 15개). VIX 옵션은 파일 `IV` 열이 크게 틀리는 날이 많다. 파일 값은 대조용으로만
+  출력하고, 평소보다 크게 어긋난 날은 `[확인 필요]`로 알린다.
+- 보관본에는 기초자산 가격과 수집 시각 열이 없다. 기초자산 수준은 패리티 선도가로,
+  수집 시각은 압축파일 안 CSV의 수정 시각으로 읽는다. SPX·VIX 옵션은 정규장 뒤
+  17:00(미 동부)까지 연장 거래가 있어 선도가에 마감 뒤 움직임이 섞인다. 야후 종가를
+  받을 수 있으면 함께 출력한다.
+- `Open Interest`는 전 영업일 마감 기준이다. 두 파일 사이의 증감은 **전 거래일** 거래의
+  결과이고 `Volume`은 당일 것이다(11-12→11-13 SPX에서 증감과 11-12 거래량의 상관 0.81,
+  11-13 거래량과는 0.31).
+- "평소의 N배"는 그 지표의 과거 하루 변화 절댓값의 중앙값 대비 오늘 변화의 크기다.
 
 ## 설계상 중요한 결정들
 
