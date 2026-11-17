@@ -944,8 +944,10 @@ def chart(res, path):
             ax.plot([t, t], [ylo, yhi], color=GRID, lw=1.0 * pt)
             text(left + (t - xlo) * sx, ptop + ph + 32, _k(t), 21, MUTED, ha="center")
         for k, v, col in ((kp, vp, C_PREV), (kt, vt, C_TODAY)):
-            m = (k >= xlo) & (k <= xhi)
-            ax.plot(k[m], v[m], color=col, lw=4.6 * pt, solid_joinstyle="round", solid_capstyle="round")
+            # 범위 밖 이웃 점까지 넘겨 선이 확대 틀 끝까지 이어지게 한다(틀 밖은 잘림). 행사가 간격이 넓은 기초자산에서 선이 중간에 끊기지 않게
+            i0 = max(int(np.searchsorted(k, xlo)) - 1, 0)
+            i1 = min(int(np.searchsorted(k, xhi, side="right")) + 1, len(k))
+            ax.plot(k[i0:i1], v[i0:i1], color=col, lw=4.6 * pt, solid_joinstyle="round", solid_capstyle="round")
 
         def xy(k, v):
             return left + (k - xlo) * sx, ptop + (yhi - v) * sy
@@ -955,9 +957,16 @@ def chart(res, path):
             fg.add_patch(Circle(c, r + 5, facecolor=SURF, edgecolor="none", zorder=5))
             fg.add_patch(Circle(c, r - 2 if hollow else r, facecolor=SURF if hollow else col, edgecolor=col, lw=(4 if hollow else 0) * pt, zorder=6))
 
-        def tag(c, s, upper_right, px=21):                            # 곡선이 오른쪽으로 내려가므로 점의 오른쪽 위와 왼쪽 아래가 비어 있다
-            text(c[0] + (18 if upper_right else -18), c[1] + (-20 if upper_right else 38), s, px, INK, "medium",
-                 ha="left" if upper_right else "right", ax=fg, zorder=7)
+        def rises(k, v, at):
+            """at 근처에서 곡선이 오른쪽으로 올라가는가. 확대 폭의 15%만큼 양옆 값을 비교해 잔물결은 무시한다."""
+            h = 0.15 * (xhi - xlo)
+            return float(np.interp(at + h, k, v) - np.interp(at - h, k, v)) > 0
+
+        def tag(c, s, up, rise, px=21):
+            # 곡선이 오른쪽으로 내려가면(SPX) 점의 오른쪽 위와 왼쪽 아래가, 올라가면(VIX 옵션) 왼쪽 위와 오른쪽 아래가 비어 있다
+            right = (not rise) if up else rise
+            text(c[0] + (18 if right else -18), c[1] + (-20 if up else 38), s, px, INK, "medium",
+                 ha="left" if right else "right", ax=fg, zorder=7)
         if not (xlo <= a["strike_prev"] <= xhi and xlo <= a["strike"] <= xhi):
             return ptop + ph, False
         P, Hp, Tp = xy(a["strike_prev"], a["iv_prev"]), xy(a["strike"], a["iv_prev_at_new"]), xy(a["strike"], a["iv"])
@@ -968,12 +977,12 @@ def chart(res, path):
             fg.plot([P[0], Hp[0]], [P[1], Hp[1]], color=INK2, lw=2.2 * pt, zorder=4)
             fg.plot([Hp[0], Tp[0]], [Hp[1], Tp[1]], color=INK2, lw=2.2 * pt, zorder=4)
             dot(Hp, C_PREV, hollow=True)
-            tag(Hp, f"{a['iv_prev_at_new']:.1f}%", not above)
+            tag(Hp, f"{a['iv_prev_at_new']:.1f}%", not above, rises(kp, vp, a["strike"]))
         dot(P, C_PREV)
         dot(Tp, C_TODAY)
         if big:
-            tag(P, L["atm_prev"].format(v=f"{a['iv_prev']:.1f}"), not above)
-            tag(Tp, L["atm"].format(v=f"{a['iv']:.1f}"), above)
+            tag(P, L["atm_prev"].format(v=f"{a['iv_prev']:.1f}"), not above, rises(kp, vp, a["strike_prev"]))
+            tag(Tp, L["atm"].format(v=f"{a['iv']:.1f}"), above, rises(kt, vt, a["strike"]))
         return ptop + ph, hollow
 
     xt, step = _ticks(min(kp[0], kt[0]), max(kp[-1], kt[-1]), 6)          # 기초자산마다 행사가 범위가 달라 눈금을 그때그때 정한다
