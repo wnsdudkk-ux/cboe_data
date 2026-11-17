@@ -70,10 +70,20 @@ class Helpers(unittest.TestCase):
         self.assertEqual(g["call_wing"], 10 + 11)
         self.assertEqual(g["put_body"] + g["put_wing"], bins[0].sum())
 
-    def test_atm_strike_is_nearest_25(self):
-        self.assertEqual(vd.atm_strike(7688.62), 7700)                  # Cboe 도구의 2026-11-04 값과 맞는 규칙
-        self.assertEqual(vd.atm_strike(7353.73), 7350)
-        self.assertEqual(vd.atm_strike(7561.67), 7550)
+    def test_atm_strike_is_forward_rounded_to_5(self):
+        # 30일 선도가의 5단위 반올림. 값은 실제 날짜의 30일 선도가와 Cboe 도구(atmPairs)의 등가격 행사가
+        self.assertEqual(vd.atm_strike(7722.01), 7720)                  # 2026-11-04
+        self.assertEqual(vd.atm_strike(7364.33), 7365)                  # 2026-11-05
+        self.assertEqual(vd.atm_strike(7564.17), 7565)                  # 2026-11-13
+
+    def test_forward30_interpolates_terms_to_30_days(self):
+        lv = {"terms": [{"minutes": 25 * 1440, "F": 5000.0}, {"minutes": 32 * 1440, "F": 5007.0}]}
+        self.assertAlmostEqual(vd.forward30(lv), 5005.0, places=9)
+        self.assertTrue(np.isnan(vd.forward30({"terms": []})))
+
+    def test_atm_comes_from_forward_when_available(self):
+        lv = {"terms": [{"minutes": 25 * 1440, "F": 5003.0}, {"minutes": 32 * 1440, "F": 5010.0}]}
+        self.assertEqual(vd.atm_strike(vd.forward30(lv)), 5010)        # 30일 선도가 5008 → 5010(지수 종가와 무관)
 
     def test_factors_need_spot_and_curve(self):
         lv = {"vix": 20.0, "curve": None}

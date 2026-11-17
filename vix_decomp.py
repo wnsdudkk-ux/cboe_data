@@ -23,12 +23,13 @@
     풋 스큐·콜 스큐·하방 볼록성·상방 볼록성 = 'VIX - 등가격 IV'의 변화를 네 구간의 몫으로 나눈 것.
       그날의 델타로 구간을 정한다(스큐 = 델타 10~50, 볼록성 = 델타 10 미만). 구간의 몫 = 그 구간 옵션이 VIX에 기여한 포인트
       - 곡선이 평평했다면(모든 행사가의 IV가 등가격 IV와 같다면) 기여했을 포인트.
-  앞의 두 요인은 Cboe 도구와 정의가 같다(2026-11-04→11-05: 도구 4.57 / 3.98, 이 스크립트 4.56 / 4.00).
+  앞의 두 요인은 Cboe 도구와 정의가 같다. 도구가 쓰는 공개 자료(www-api.cboe.com/vix_decomposition/: 요인, 등가격 행사가,
+  날짜별 30일 곡선)와 2026-07-07~11-16의 82개 날짜 쌍을 맞대어 보면, 30일 곡선은 등가격 ±10%에서 평균 0.015%포인트 차이로 같고,
+  두 요인의 오차(평균제곱근)는 곡선 따라 이동 0.01, 평행 이동 0.02 안팎이다(README).
   뒤의 네 요인은 Cboe가 계산식을 공개하지 않아 같은 틀로 직접 정의한 것이라 도구의 값과 다르다
-  (같은 날 도구: 2.20 / -0.82 / 3.29 / -1.64, 이 스크립트: 2.18 / -2.46 / 3.58 / -0.29. 풋 쪽 둘은 가깝고, 콜 쪽은 둘의 합(-2.46 대 -2.75)만
-  비슷하고 스큐와 볼록성 사이의 배분이 다르다).
-- 등가격 행사가: S&P 500 종가에 가장 가까운 25단위 행사가(위 날짜에서 도구의 값과 맞는 규칙). 종가를 받지 못하면
-  가장 가까운 만기의 선도가(옵션에서 역산한 지수 수준)를 대신 쓴다.
+  (같은 82개 쌍의 오차: 풋 스큐 0.21, 콜 스큐 0.39, 하방 볼록성 0.41, 상방 볼록성 0.24. 백서 설명대로 다시 계산해도 맞지 않는다. README).
+- 등가격 행사가: 두 VIX 만기의 선도가를 잔존 30일로 보간한 값(옵션에서 역산한 30일 선도가)을 5단위로 반올림한 행사가.
+  Cboe 도구의 등가격 행사가와 87일 가운데 84일 같다. 선도가를 만들지 못하면 S&P 500 종가를 5단위로 반올림한다.
 """
 import argparse
 import datetime as dt
@@ -46,11 +47,12 @@ M365, M30 = 525600.0, 43200.0          # 365일, 30일의 분 수
 VIX_ROOTS = {"SPX": (9, 30), "SPXW": (16, 0)}    # 루트별 만기 시각(미 동부). SPX는 아침 결제, SPXW는 종가 결제
 WING = 0.10                            # 이 델타 미만을 '볼록성(먼 외가격)' 구간으로 본다
 NB = 10                                # 델타 5단위 구간 수(한쪽)
-ATM_STEP = 25.0                        # 등가격 행사가를 고를 때 쓰는 행사가 단위
+ATM_STEP = 5.0                         # 등가격 행사가 = 30일 선도가를 이 단위로 반올림(Cboe 도구와 같은 규칙)
 FACTORS = ["sticky", "parallel", "put_skew", "call_skew", "down_conv", "up_conv"]
 REGION = {"put_skew": "put_body", "call_skew": "call_body", "down_conv": "put_wing", "up_conv": "call_wing"}
 # 풋 쪽(풋 스큐+하방 볼록성)·콜 쪽(콜 스큐+상방 볼록성) 요인이 등가격 IV 변화(곡선 따라 이동+평행 이동)에 딸려 움직이는 비율.
 # 2026-07-06~11-13의 85개 날짜 쌍에서 풋 쪽 +0.62배(상관 0.89), 콜 쪽 -0.32배(상관 -0.93)였다
+# (등가격 행사가를 30일 선도가 기준으로 바꾼 뒤 84개 쌍으로 다시 재도 +0.64배(0.91), -0.32배(-0.93))
 SIDE_BETA = {"put": 0.6, "call": -0.3}
 NAN = float("nan")
 
@@ -285,20 +287,36 @@ def premium(lv, atm):
     return {k: act[k] - ref[k] for k in act}
 
 
-def atm_strike(spot):
-    return ATM_STEP * round(spot / ATM_STEP)
+def atm_strike(level):
+    """등가격 행사가 = 30일 선도가(없으면 지수 수준)를 ATM_STEP 단위로 반올림한 값."""
+    return ATM_STEP * round(level / ATM_STEP)
+
+
+def forward30(lv):
+    """두 VIX 만기의 선도가를 잔존 30일로 (시간에 대해 직선으로) 보간한 값. Cboe 도구가 등가격 행사가를 고를 때 쓰는 수준과 같다
+    (도구 자료의 델타에서 역산한 선도가와 거의 같고, 이 값의 5단위 반올림이 도구의 등가격 행사가와 87일 중 84일 같다). 못 구하면 nan."""
+    try:
+        t1, t2 = lv["terms"]
+        m1, m2 = float(t1["minutes"]), float(t2["minutes"])
+        f = float(t1["F"] + (t2["F"] - t1["F"]) * (M30 - m1) / (m2 - m1))
+        return f if f > 0 else NAN
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return NAN
 
 
 def cboe_factors(prev, today, s0, s1):
-    """어제(prev)와 오늘(today)의 level() 결과, 두 날의 지수 수준 s0, s1로 요인 여섯 개를 계산한다. 합 = 오늘 VIX - 어제 VIX."""
+    """어제(prev)와 오늘(today)의 level() 결과로 요인 여섯 개를 계산한다. 합 = 오늘 VIX - 어제 VIX.
+    등가격 행사가는 그날의 30일 선도가로 정하고, 선도가를 못 구한 날만 지수 수준 s0, s1을 쓴다."""
     if "error" in prev or "error" in today:
         return {"error": prev.get("error") or today.get("error")}
     if prev["curve"] is None or today["curve"] is None:
         return {"error": "30일 곡선을 만들지 못함(두 만기에 공통인 행사가 부족)"}
-    if not (s0 == s0 and s1 == s1):
+    x0, x1 = forward30(prev), forward30(today)
+    x0, x1 = (x0 if x0 == x0 else s0), (x1 if x1 == x1 else s1)
+    if not (x0 == x0 and x1 == x1):
         return {"error": "지수 수준을 알 수 없어 등가격 행사가를 정하지 못함"}
     (k0, v0), (k1, v1) = prev["curve"], today["curve"]
-    a0, a1 = atm_strike(s0), atm_strike(s1)
+    a0, a1 = atm_strike(x0), atm_strike(x1)
     if not (k0[0] <= a0 <= k0[-1] and k0[0] <= a1 <= k0[-1] and k1[0] <= a1 <= k1[-1]):
         return {"error": f"등가격 행사가({a0:g}, {a1:g})가 30일 곡선 범위 밖임"}
     iv00, iv01, iv11 = (100 * float(np.interp(x, k, v)) for x, k, v in ((a0, k0, v0), (a1, k0, v0), (a1, k1, v1)))
@@ -859,7 +877,7 @@ def self_test():
     assert pr["put_body"] > 0.3 and pr["put_wing"] > 0.3 and pr["call_body"] < -0.3, pr      # 풋 쪽은 더하고 콜 쪽은 던다
     f = fac(b, chain(d1, 0.98 * F0, skew), F0, 0.98 * F0)               # 지수 -2%, 행사가별 IV는 그대로: 곡선 따라 이동만
     assert abs(f["sticky"] - 60 * math.log(1 / 0.98)) < 0.02 and abs(f["parallel"]) < 0.02, (f["sticky"], f["parallel"])
-    assert f["atm"]["strike_prev"] == 5000 and f["atm"]["strike"] == 4900 and atm_strike(7688.62) == 7700 and atm_strike(7353.73) == 7350
+    assert f["atm"]["strike_prev"] == 5000 and f["atm"]["strike"] == 4900 and atm_strike(7722.01) == 7720 and atm_strike(7364.33) == 7365
     g = fac(b, chain(d1, 0.98 * F0, lambda K: skew(K) + np.where(K < 0.8 * F0, 0.05, 0.0)), F0, 0.98 * F0)   # 거기에 먼 풋만 5%포인트 더 비싸짐
     assert g["down_conv"] - f["down_conv"] > 0.3 and abs(g["sticky"] - f["sticky"]) < 1e-9 and abs(g["up_conv"] - f["up_conv"]) < 0.02
     # 금요일이 휴장인 주(12-25, 01-01)는 목요일 만기를 쓴다
