@@ -63,7 +63,7 @@ SPECS = {
             "under": "GLD", "index": "GVZ", "yahoo": ("GLD", "^GVZ"), "opt": "GLD 옵션"},
 }
 VIX_ROOTS = SPECS["SPX"]["roots"]       # 예전 이름(시험·다른 스크립트가 쓴다)
-WING = 0.10                            # 이 델타 미만을 '볼록성(먼 외가격)' 구간으로 본다
+WING = 0.10                            # 이 델타 미만을 '볼록성(극외가격)' 구간으로 본다
 NB = 10                                # 델타 5단위 구간 수(한쪽)
 ATM_STEP = SPECS["SPX"]["step"]        # 등가격 행사가 = 30일 선도가를 이 단위로 반올림(Cboe 도구와 같은 규칙)
 FACTORS = ["sticky", "parallel", "put_skew", "call_skew", "down_conv", "up_conv"]
@@ -302,7 +302,7 @@ def level(df, date, spec="SPX"):
 
 
 def groups(bins):
-    """델타 구간을 네 묶음으로: 풋 꼬리(델타 10 미만), 풋 몸통(10~50), 콜 몸통, 콜 꼬리."""
+    """델타 구간을 네 묶음으로: 극외가격 풋(델타 10 미만), 외가격 풋(10~50), 외가격 콜(10~50), 극외가격 콜(10 미만)."""
     n = int(round(WING * 100 / 5))
     return {"put_wing": float(bins[0, :n].sum()), "put_body": float(bins[0, n:].sum()),
             "call_body": float(bins[1, n:].sum()), "call_wing": float(bins[1, :n].sum())}
@@ -626,7 +626,7 @@ def clean(o):
 
 # ----------------------------------------------------------------------------- 글 보고
 NAMES = {"sticky": "곡선 따라 이동", "parallel": "평행 이동", "put_skew": "풋 스큐", "call_skew": "콜 스큐", "down_conv": "하방 볼록성", "up_conv": "상방 볼록성"}
-GROUPS = {"put_wing": "풋 10델타 미만", "put_body": "풋 10~50델타", "call_body": "콜 10~50델타", "call_wing": "콜 10델타 미만"}
+GROUPS = {"put_wing": "극외가격 풋(10델타 미만)", "put_body": "외가격 풋(10~50델타)", "call_body": "외가격 콜(10~50델타)", "call_wing": "극외가격 콜(10델타 미만)"}
 
 
 def _ymd(d):
@@ -689,7 +689,7 @@ def report(res):
     L.append(f"  [{idx} 구성: 델타 구간별 기여(포인트)와 비중] " + " | ".join(
         f"{GROUPS[k]} {res['points'][k]:.2f}({res['share'][k] * 100:.1f}%" + (f", 전일 {shp[k] * 100:.1f}%" if k in shp else "") + ")" for k in GROUPS))
     if "share_rank" in res:
-        L.append(f"    풋 10델타 미만 비중은 최근 {res['share_rank']['n']}일 중 {res['share_rank']['rank']}번째로 높음")
+        L.append(f"    극외가격 풋(10델타 미만) 비중은 최근 {res['share_rank']['n']}일 중 {res['share_rank']['rank']}번째로 높음")
     for x in res["flags"]:
         L.append(f"  [확인 필요] {x}")
     return "\n".join(L)
@@ -705,8 +705,8 @@ TXT = {
                  "down_conv": "하방 볼록성", "up_conv": "상방 볼록성"},
            "fs": {"sticky": "등가격 행사가 {a0} \u2192 {a1}. 어제 곡선에서 그 자리의 IV는 {v0}% \u2192 {v01}%", "sticky0": "등가격 행사가는 {a1} 그대로",
                   "parallel": "행사가 {a1}의 IV가 어제 곡선 {v01}% \u2192 오늘 곡선 {v1}%",
-                  "put_skew": "풋(델타 10~50)이 등가격보다 비싼 정도의 변화", "call_skew": "콜(델타 10~50)이 등가격보다 비싼 정도의 변화",
-                  "down_conv": "먼 풋(델타 10 미만)이 등가격보다 비싼 정도의 변화", "up_conv": "먼 콜(델타 10 미만)이 등가격보다 비싼 정도의 변화"},
+                  "put_skew": "외가격 풋(델타 10~50)이 등가격보다 비싼 정도의 변화", "call_skew": "외가격 콜(델타 10~50)이 등가격보다 비싼 정도의 변화",
+                  "down_conv": "극외가격 풋(델타 10 미만)이 등가격보다 비싼 정도의 변화", "up_conv": "극외가격 콜(델타 10 미만)이 등가격보다 비싼 정도의 변화"},
            "note_off": "직접 계산한 VIX {a} → {b} (공식 종가와의 차이 {da}, {db})", "note_own": "VIX는 직접 계산한 값이다(공식 종가를 받지 못함)",
            "note_spot": "S&P 500은 옵션에서 역산한 지수 수준이다(종가를 받지 못함)", "curve": "내재변동성 곡선",
            "curve_s": "잔존 30일로 맞춘 행사가별 IV. 점은 그날의 등가격 행사가", "zoom": "등가격 부근 확대",
@@ -719,8 +719,8 @@ TXT = {
                  "down_conv": "Downside convexity", "up_conv": "Upside convexity"},
            "fs": {"sticky": "ATM moves {a0} \u2192 {a1} on yesterday's curve: IV {v0}% \u2192 {v01}%", "sticky0": "ATM strike unchanged at {a1}",
                   "parallel": "at strike {a1} the curve moves {v01}% \u2192 {v1}%",
-                  "put_skew": "puts (10-50 delta) versus ATM", "call_skew": "calls (10-50 delta) versus ATM",
-                  "down_conv": "far puts (under 10 delta) versus ATM", "up_conv": "far calls (under 10 delta) versus ATM"},
+                  "put_skew": "OTM puts (10-50 delta) versus ATM", "call_skew": "OTM calls (10-50 delta) versus ATM",
+                  "down_conv": "deep OTM puts (under 10 delta) versus ATM", "up_conv": "deep OTM calls (under 10 delta) versus ATM"},
            "note_off": "Replicated VIX {a} → {b} (minus official close: {da}, {db})", "note_own": "VIX column is the replicated value (no official close)",
            "note_spot": "S&P 500 is the option-implied level (no close available)", "curve": "Implied volatility curves",
            "curve_s": "30-day IV by strike; dots mark each day's ATM strike", "zoom": "Near the money",
@@ -734,8 +734,8 @@ TAG = {"sticky": "STICKY STRIKE", "parallel": "PARALLEL SHIFT", "put_skew": "PUT
 TXT_SPEC = {
     "ko": {
         ("SPX", "cboe"): {"sub": "Cboe VIX Decomposition 도구의 공식값",
-                          "fs_put_skew": "풋(델타 약 15~45)의 IV가 평행 이동보다 더 오른 몫", "fs_call_skew": "콜(델타 약 15~45)의 IV가 평행 이동보다 더 오른 몫",
-                          "fs_down_conv": "먼 풋(델타 약 1~15)의 IV가 그보다 더 오른 몫", "fs_up_conv": "먼 콜(델타 약 1~15)의 IV가 그보다 더 오른 몫",
+                          "fs_put_skew": "외가격 풋(델타 약 15~45)의 IV가 평행 이동보다 더 오른 몫", "fs_call_skew": "외가격 콜(델타 약 15~45)의 IV가 평행 이동보다 더 오른 몫",
+                          "fs_down_conv": "극외가격 풋(델타 약 1~15)의 IV가 그보다 더 오른 몫", "fs_up_conv": "극외가격 콜(델타 약 1~15)의 IV가 그보다 더 오른 몫",
                           "foot": "자료: Cboe VIX Decomposition 도구(요인·곡선·종가) · 대조: SPX 옵션 마감 호가로 직접 계산한 VIX"},
         ("VIX", "own"): {"title": "VIX 옵션 변동성 분해", "sub": "VIX 옵션 마감 호가로 직접 계산한 30일 변동성 지수(VVIX와 같은 방식)",
                          "spx": "VIX", "vix": "VVIX", "fac": "VVIX 변화 요인",
@@ -1119,7 +1119,7 @@ def self_test():
     f = fac(b, chain(d1, 0.98 * F0, skew), F0, 0.98 * F0)               # 지수 -2%, 행사가별 IV는 그대로: 곡선 따라 이동만
     assert abs(f["sticky"] - 60 * math.log(1 / 0.98)) < 0.02 and abs(f["parallel"]) < 0.02, (f["sticky"], f["parallel"])
     assert f["atm"]["strike_prev"] == 5000 and f["atm"]["strike"] == 4900 and atm_strike(7722.01) == 7720 and atm_strike(7364.33) == 7365
-    g = fac(b, chain(d1, 0.98 * F0, lambda K: skew(K) + np.where(K < 0.8 * F0, 0.05, 0.0)), F0, 0.98 * F0)   # 거기에 먼 풋만 5%포인트 더 비싸짐
+    g = fac(b, chain(d1, 0.98 * F0, lambda K: skew(K) + np.where(K < 0.8 * F0, 0.05, 0.0)), F0, 0.98 * F0)   # 거기에 극외가격 풋만 5%포인트 더 비싸짐
     assert g["down_conv"] - f["down_conv"] > 0.3 and abs(g["sticky"] - f["sticky"]) < 1e-9 and abs(g["up_conv"] - f["up_conv"]) < 0.02
     # 금요일이 휴장인 주(12-25, 01-01)는 목요일 만기를 쓴다
     e = pd.DataFrame({"exp": pd.to_datetime(["2026-12-11", "2026-12-18", "2026-12-18", "2026-12-23", "2026-12-24", "2026-12-31", "2027-01-08"]),

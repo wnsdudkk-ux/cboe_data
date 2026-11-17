@@ -449,9 +449,9 @@ def report(t, res, d0, d1):
     L.append("  [등가격 IV] " + " | ".join(f"{d}일 {P(h[f'atm{d}'])} ({ctx_txt(c.get(f'atm{d}'))})" for d in (7, 30, 90)) + f" | 180일 {P(h['atm180'])}")
     L.append(f"  [대조: 파일의 Cboe IV 열 기준 30일 등가격] {P(h['atm30_cboe'], 2)} ({ctx_txt(c.get('atm30_cboe'))}) | 호가 기준과의 차이 {D(h['atm30_cboe'] - h['atm30'])} (전일 {D(p0['atm30_cboe'] - p0['atm30'])})")
     L.append(f"  [기간구조] 7일-30일 {D(h['ts_7_30'])} ({ctx_txt(c.get('ts_7_30'))}) | 30일-90일 {D(h['ts_30_90'])} ({ctx_txt(c.get('ts_30_90'))})")
-    L.append(f"  [스큐: 25델타 풋 IV - 콜 IV] 30일 {D(h['rr30'])} ({ctx_txt(c.get('rr30'))}) | 90일 {D(h['rr90'])} ({ctx_txt(c.get('rr90'))})")
-    L.append(f"  [꼬리: 10델타 IV - 등가격 IV, 30일] 풋 쪽 {D(h['ptail30'])} ({ctx_txt(c.get('ptail30'))}) | 콜 쪽 {D(h['ctail30'])} ({ctx_txt(c.get('ctail30'))})"
-             f" | 양 날개 평균-등가격(25델타) {D(h['bf30'])} ({ctx_txt(c.get('bf30'))})")
+    L.append(f"  [스큐: 외가격 25델타 풋 IV - 콜 IV] 30일 {D(h['rr30'])} ({ctx_txt(c.get('rr30'))}) | 90일 {D(h['rr90'])} ({ctx_txt(c.get('rr90'))})")
+    L.append(f"  [극외가격: 10델타 IV - 등가격 IV, 30일] 풋 {D(h['ptail30'])} ({ctx_txt(c.get('ptail30'))}) | 콜 {D(h['ctail30'])} ({ctx_txt(c.get('ctail30'))})"
+             f" | 외가격 25델타 풋·콜 평균 - 등가격 {D(h['bf30'])} ({ctx_txt(c.get('bf30'))})")
     for tg in (30, 90):
         f = pr.get(f"fs{tg}")
         if f:
