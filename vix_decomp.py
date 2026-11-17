@@ -44,44 +44,84 @@ import pandas as pd
 from option_sentiment import ET, R, b76, implied_vol, list_dates, load_day, ncdf
 
 M365, M30 = 525600.0, 43200.0          # 365일, 30일의 분 수
-VIX_ROOTS = {"SPX": (9, 30), "SPXW": (16, 0)}    # 루트별 만기 시각(미 동부). SPX는 아침 결제, SPXW는 종가 결제
+# 기초자산별 계산 설정. 같은 VIX 산출 방법론을 SPX 옵션(VIX), VIX 옵션(VVIX), GLD 옵션(GVZ)에 쓴다.
+#   roots: 루트별 만기 시각(미 동부). SPX·VIX 옵션은 아침 결제(9:30), SPXW·GLD는 종가 결제(16:00)
+#   lag: 호가 시점 = 주식시장 마감 + lag분(SPX·VIX 옵션은 16:15에 끝나고 GLD 옵션은 16:00에 끝난다)
+#   rule: 두 만기를 고르는 규칙(pick_terms). 공식 지수와 맞대어 고른 것이다(2026-07-06~11-16, 87일, README)
+#     weekly30  주말(금요일, 휴장이면 목요일) 만기 중 잔존 30일 이하에서 가장 먼 것과 그다음(지금의 VIX 방법론). 공식 VIX와 차이 0.01 안팎
+#     classic8  월물(VIX 옵션의 표준 만기)만, 잔존 8일 이상인 첫 두 만기(옛 VIX 방법론, VVIX 방식). 공식 VVIX와 차이 중앙값 0.01, 90% 0.04
+#     monthly30 월물(셋째 금요일)만, 잔존 8~30일에서 가장 먼 것과 30일 넘는 첫 만기. 30일 이하가 없으면 30일 넘는 첫 두 만기로 바깥 보간
+#               (GVZ 방식). 공식 GVZ와 차이 중앙값 0.02, 90% 0.12
+#   step: 등가격 행사가 = 30일 선도가를 이 단위로 반올림. SPX는 Cboe 도구와 같은 5
+#   tol: 직접 계산한 지수가 공식 값과 이만큼 넘게 다르면 [확인 필요]로 알린다
+SPECS = {
+    "SPX": {"roots": {"SPX": (9, 30), "SPXW": (16, 0)}, "lag": 15, "rule": "weekly30", "step": 5.0, "tol": 0.05,
+            "under": "S&P 500", "index": "VIX", "yahoo": ("^GSPC", "^VIX"), "opt": "SPX 옵션"},
+    "VIX": {"roots": {"VIX": (9, 30)}, "lag": 15, "rule": "classic8", "step": 0.5, "tol": 0.3,
+            "under": "VIX", "index": "VVIX", "yahoo": ("^VIX", "^VVIX"), "opt": "VIX 옵션"},
+    "GLD": {"roots": {"GLD": (16, 0)}, "lag": 0, "rule": "monthly30", "step": 1.0, "tol": 0.3,
+            "under": "GLD", "index": "GVZ", "yahoo": ("GLD", "^GVZ"), "opt": "GLD 옵션"},
+}
+VIX_ROOTS = SPECS["SPX"]["roots"]       # 예전 이름(시험·다른 스크립트가 쓴다)
 WING = 0.10                            # 이 델타 미만을 '볼록성(먼 외가격)' 구간으로 본다
 NB = 10                                # 델타 5단위 구간 수(한쪽)
-ATM_STEP = 5.0                         # 등가격 행사가 = 30일 선도가를 이 단위로 반올림(Cboe 도구와 같은 규칙)
+ATM_STEP = SPECS["SPX"]["step"]        # 등가격 행사가 = 30일 선도가를 이 단위로 반올림(Cboe 도구와 같은 규칙)
 FACTORS = ["sticky", "parallel", "put_skew", "call_skew", "down_conv", "up_conv"]
 REGION = {"put_skew": "put_body", "call_skew": "call_body", "down_conv": "put_wing", "up_conv": "call_wing"}
 # 풋 쪽(풋 스큐+하방 볼록성)·콜 쪽(콜 스큐+상방 볼록성) 요인이 등가격 IV 변화(곡선 따라 이동+평행 이동)에 딸려 움직이는 비율.
-# 2026-07-06~11-13의 85개 날짜 쌍에서 풋 쪽 +0.62배(상관 0.89), 콜 쪽 -0.32배(상관 -0.93)였다
-# (등가격 행사가를 30일 선도가 기준으로 바꾼 뒤 84개 쌍으로 다시 재도 +0.64배(0.91), -0.32배(-0.93))
-SIDE_BETA = {"put": 0.6, "call": -0.3}
+# SPX(이 스크립트의 정의): 2026-07-06~11-13의 85개 날짜 쌍에서 풋 쪽 +0.62배(상관 0.89), 콜 쪽 -0.32배(상관 -0.93)였다
+# (등가격 행사가를 30일 선도가 기준으로 바꾼 뒤 84개 쌍으로 다시 재도 +0.64배(0.91), -0.32배(-0.93)).
+# VIX·GLD: 같은 정의로 2026-07-07~11-16의 84개 날짜 쌍에서 잰 값. VIX 옵션 풋 쪽 -0.21배(상관 -0.84), 콜 쪽 +0.07배(+0.30),
+#   GLD 풋 쪽 +0.11배(+0.30), 콜 쪽 -0.02배(-0.07). SPX_CBOE: Cboe 도구 공식값 95일치에서 잰 값. 풋 쪽 +0.40배(+0.74), 콜 쪽 -0.09배(-0.33).
+#   상관이 0.4보다 약한 관계는 0으로 둔다(그날 값을 평소 크기와 그대로 견준다)
+SIDE_BETAS = {"SPX": {"put": 0.6, "call": -0.3}, "VIX": {"put": -0.2, "call": 0.0}, "GLD": {"put": 0.0, "call": 0.0},
+              "SPX_CBOE": {"put": 0.4, "call": 0.0}}
+SIDE_BETA = SIDE_BETAS["SPX"]
+CBOE_API = "https://www-api.cboe.com/vix_decomposition/"   # Cboe VIX Decomposition 도구 페이지가 읽는 공개 자료
+CBOE_KEYS = {"stickyStrike": "sticky", "parallelShift": "parallel", "putSkew": "put_skew", "callSkew": "call_skew",
+             "downsideConvexity": "down_conv", "upsideConvexity": "up_conv"}
 NAN = float("nan")
 
 
 # ----------------------------------------------------------------------------- 시각·만기
-def quote_time(date):
-    """호가 시점(미 동부, 벽시계) = SPX 옵션 정규장 마감 = 주식시장 마감 + 15분(보통 16:15). 조기 폐장일은 달력 라이브러리가 있을 때만 반영한다.
-    보관본의 SPX 호가는 이 시각의 값이다(직접 계산한 VIX가 공식 종가와 0.01~0.03 차이로 맞는 것으로 확인)."""
+def quote_time(date, lag=15):
+    """호가 시점(미 동부, 벽시계) = 주식시장 마감 + lag분(SPX·VIX 옵션은 보통 16:15, GLD 옵션은 16:00). 조기 폐장일은 달력 라이브러리가
+    있을 때만 반영한다. 보관본의 SPX 호가는 이 시각의 값이다(직접 계산한 VIX가 공식 종가와 0.01~0.03 차이로 맞는 것으로 확인)."""
     try:
         import exchange_calendars as xc
         close = xc.get_calendar("XNYS").session_close(pd.Timestamp(date)).tz_convert(ET)
-        return close.to_pydatetime().replace(tzinfo=None) + dt.timedelta(minutes=15)
+        return close.to_pydatetime().replace(tzinfo=None) + dt.timedelta(minutes=lag)
     except Exception:
-        return dt.datetime.strptime(date, "%Y%m%d").replace(hour=16, minute=15)
+        return dt.datetime.strptime(date, "%Y%m%d").replace(hour=16, minute=0) + dt.timedelta(minutes=lag)
 
 
-def pick_terms(df, date):
-    """VIX에 쓰는 두 만기 [(만기일, 루트), (만기일, 루트)]. 주말(금요일, 금요일이 휴장이면 목요일) 만기만 후보다.
-    같은 날 SPX(아침 결제)와 SPXW가 함께 있으면 SPX를 쓴다. 근월 = 잔존 30일 이하 중 가장 먼 것, 차월 = 그다음."""
-    e = df[df["root"].isin(list(VIX_ROOTS))][["exp", "root"]].drop_duplicates()
+def pick_terms(df, date, spec="SPX"):
+    """지수 계산에 쓰는 두 만기 [(만기일, 루트), (만기일, 루트)]. 규칙은 SPECS[spec]["rule"](설명은 SPECS 위 주석).
+    weekly30: 주말(금요일, 금요일이 휴장이면 목요일) 만기만 후보. 같은 날 SPX(아침 결제)와 SPXW가 함께 있으면 SPX를 쓴다.
+    근월 = 잔존 30일 이하 중 가장 먼 것, 차월 = 그다음."""
+    roots, rule = SPECS[spec]["roots"], SPECS[spec]["rule"]
+    e = df[df["root"].isin(list(roots))][["exp", "root"]].drop_duplicates()
     if e.empty:
         return None
-    wd = e["exp"].dt.weekday
-    week = e["exp"] - pd.to_timedelta(wd, unit="D")
-    fri_weeks = set(week[wd == 4])
-    e = e[(wd == 4) | ((wd == 3) & ~week.isin(fri_weeks))]
+    wd, day = e["exp"].dt.weekday, e["exp"].dt.day
+    if rule == "weekly30":
+        week = e["exp"] - pd.to_timedelta(wd, unit="D")
+        fri_weeks = set(week[wd == 4])
+        e = e[(wd == 4) | ((wd == 3) & ~week.isin(fri_weeks))]
+    elif rule == "monthly30":                                        # 셋째 금요일(그날이 휴장이면 전날 목요일)
+        e = e[((wd == 4) & (day >= 15) & (day <= 21)) | ((wd == 3) & (day >= 14) & (day <= 20))]
     e = e.sort_values(["exp", "root"]).drop_duplicates("exp")          # "SPX" < "SPXW"
     dte = (e["exp"] - pd.Timestamp(date)).dt.days
-    near, nxt = e[dte <= 30].tail(1), e[dte > 30].head(1)
+    if rule == "classic8":
+        two = e[dte >= 8].head(2)
+        return [tuple(x) for x in two[["exp", "root"]].itertuples(index=False)] if len(two) == 2 else None
+    if rule == "monthly30":
+        near, nxt = e[(dte <= 30) & (dte >= 8)].tail(1), e[dte > 30].head(1)
+        if near.empty:
+            two = e[dte > 30].head(2)
+            return [tuple(x) for x in two[["exp", "root"]].itertuples(index=False)] if len(two) == 2 else None
+    else:
+        near, nxt = e[dte <= 30].tail(1), e[dte > 30].head(1)
     if near.empty or nxt.empty or int(dte[near.index[0]]) < 1:
         return None
     return [(near["exp"].iloc[0], near["root"].iloc[0]), (nxt["exp"].iloc[0], nxt["root"].iloc[0])]
@@ -97,8 +137,9 @@ def strip_var(K, Q, F, T, K0):
     return float(c.sum() - (F / K0 - 1) ** 2 / T), c
 
 
-def term(df, exp, root, tv):
-    """만기 하나의 VIX 계산. tv = 호가 시점. 계산할 수 없으면 None."""
+def term(df, exp, root, tv, roots=None):
+    """만기 하나의 VIX 계산. tv = 호가 시점, roots = 루트별 만기 시각(생략하면 SPX). 계산할 수 없으면 None."""
+    roots = roots or VIX_ROOTS
     g = df[(df["exp"] == exp) & (df["root"] == root)]
     side = {}
     for cp in ("C", "P"):
@@ -110,7 +151,7 @@ def term(df, exp, root, tv):
     both = okc[ic] & okp[ip]
     if both.sum() < 3:
         return None
-    h, m = VIX_ROOTS[root]
+    h, m = roots[root]
     minutes = math.floor((exp.to_pydatetime().replace(hour=h, minute=m) - tv).total_seconds() / 60)
     if minutes <= 0:
         return None
@@ -228,23 +269,27 @@ def skew30(df, terms):
     return K, np.sqrt(np.maximum((w1 * v1 * v1 * d1 + w2 * v2 * v2 * d2) / 30, 0.0))
 
 
-def implied_spot(df, date, tv):
-    """옵션에서 역산한 지수 수준: 잔존 1일 이상인 가장 가까운 만기의 선도가(보유 비용이 며칠치뿐이라 현물과 거의 같다)."""
-    e = df[df["root"].isin(list(VIX_ROOTS)) & (df["dte"] >= 1)][["exp", "root"]].drop_duplicates().sort_values(["exp", "root"])
+def implied_spot(df, date, tv, spec="SPX"):
+    """옵션에서 역산한 기초자산 수준: 잔존 1일 이상인 가장 가까운 만기의 선도가(보유 비용이 며칠치뿐이라 현물과 거의 같다).
+    VIX 옵션은 만기마다 기초자산(VIX 선물)이 달라 가장 가까운 만기의 VIX 선물 수준이 된다."""
+    roots = SPECS[spec]["roots"]
+    e = df[df["root"].isin(list(roots)) & (df["dte"] >= 1)][["exp", "root"]].drop_duplicates().sort_values(["exp", "root"])
     for exp, root in list(e.itertuples(index=False))[:4]:
-        t = term(df, exp, root, tv)
+        t = term(df, exp, root, tv, roots)
         if t is not None:
             return t["F"]
     return NAN
 
 
-def level(df, date):
-    """하루치 SPX 호가로 VIX, 델타 구간별 기여, 30일 곡선을 계산한다. 계산할 수 없으면 {"error": 이유}."""
-    tv = quote_time(date)
-    pk = pick_terms(df, date)
+def level(df, date, spec="SPX"):
+    """하루치 옵션 호가로 VIX식 지수(SPX → VIX, VIX 옵션 → VVIX, GLD → GVZ), 델타 구간별 기여, 30일 곡선을 계산한다.
+    계산할 수 없으면 {"error": 이유}."""
+    sp = SPECS[spec]
+    tv = quote_time(date, sp["lag"])
+    pk = pick_terms(df, date, spec)
     if not pk:
-        return {"error": "VIX에 쓸 만기 2개를 찾지 못함"}
-    ts = [term(df, e, r, tv) for e, r in pk]
+        return {"error": f"{sp['index']}에 쓸 만기 2개를 찾지 못함"}
+    ts = [term(df, e, r, tv, sp["roots"]) for e, r in pk]
     if ts[0] is None or ts[1] is None:
         return {"error": "만기 " + ", ".join(f"{e:%m-%d}" for (e, _), t in zip(pk, ts) if t is None) + "의 호가가 부족함"}
     a = weights(ts[0]["minutes"], ts[1]["minutes"])
@@ -253,7 +298,7 @@ def level(df, date):
         return {"error": "분산이 0 이하로 계산됨"}
     bins = sum(_to_bins(t["K"], t["cp"], w * t["c"], t["dcurve"], -w * t["corr"]) for w, t in zip(a, ts))
     return {"date": date, "tv": tv, "vix": 100 * math.sqrt(var), "var": var, "terms": ts, "a": a, "bins": bins,
-            "curve": skew30(df, ts), "spot_implied": implied_spot(df, date, tv)}
+            "curve": skew30(df, ts), "spot_implied": implied_spot(df, date, tv, spec), "spec": spec}
 
 
 def groups(bins):
@@ -287,9 +332,10 @@ def premium(lv, atm):
     return {k: act[k] - ref[k] for k in act}
 
 
-def atm_strike(level):
-    """등가격 행사가 = 30일 선도가(없으면 지수 수준)를 ATM_STEP 단위로 반올림한 값."""
-    return ATM_STEP * round(level / ATM_STEP)
+def atm_strike(level, step=None):
+    """등가격 행사가 = 30일 선도가(없으면 기초자산 수준)를 step 단위(생략하면 SPX의 ATM_STEP)로 반올림한 값."""
+    step = step or ATM_STEP
+    return step * round(level / step)
 
 
 def forward30(lv):
@@ -316,7 +362,8 @@ def cboe_factors(prev, today, s0, s1):
     if not (x0 == x0 and x1 == x1):
         return {"error": "지수 수준을 알 수 없어 등가격 행사가를 정하지 못함"}
     (k0, v0), (k1, v1) = prev["curve"], today["curve"]
-    a0, a1 = atm_strike(x0), atm_strike(x1)
+    step = SPECS[today.get("spec", "SPX")]["step"]
+    a0, a1 = atm_strike(x0, step), atm_strike(x1, step)
     if not (k0[0] <= a0 <= k0[-1] and k0[0] <= a1 <= k0[-1] and k1[0] <= a1 <= k1[-1]):
         return {"error": f"등가격 행사가({a0:g}, {a1:g})가 30일 곡선 범위 밖임"}
     iv00, iv01, iv11 = (100 * float(np.interp(x, k, v)) for x, k, v in ((a0, k0, v0), (a1, k0, v0), (a1, k1, v1)))
@@ -330,18 +377,20 @@ def cboe_factors(prev, today, s0, s1):
 
 
 # ----------------------------------------------------------------------------- 여러 날 이어 붙이기·정리
-def index_closes(dates):
-    """야후 파이낸스의 S&P 500·VIX 종가 {날짜: {"spx": .., "vix": ..}}. 받지 못하면 빈 값(분석은 계속한다)."""
+def index_closes(dates, spec="SPX"):
+    """야후 파이낸스의 기초자산·공식 지수 종가 {날짜: {"spx": 기초자산, "vix": 공식 지수}}. 키 이름은 예전 그대로다
+    (SPX: S&P 500·VIX, VIX: VIX·VVIX, GLD: GLD·GVZ). 받지 못하면 빈 값(분석은 계속한다)."""
     try:
         import yfinance as yf
+        u, x = SPECS[spec]["yahoo"]
         a, b = pd.Timestamp(min(dates)), pd.Timestamp(max(dates))
-        px = yf.download(["^GSPC", "^VIX"], start=a - pd.Timedelta(days=3), end=b + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"]
+        px = yf.download([u, x], start=a - pd.Timedelta(days=3), end=b + pd.Timedelta(days=1), auto_adjust=False, progress=False)["Close"]
         px.index = pd.to_datetime(px.index).tz_localize(None).normalize()
         out = {}
         for d in dates:
             ts = pd.Timestamp(d)
             if ts in px.index:
-                row = {k: float(px.loc[ts, s]) for k, s in (("spx", "^GSPC"), ("vix", "^VIX")) if s in px and px.loc[ts, s] == px.loc[ts, s]}
+                row = {k: float(px.loc[ts, s]) for k, s in (("spx", u), ("vix", x)) if s in px and px.loc[ts, s] == px.loc[ts, s]}
                 if row:
                     out[d] = row
         return out
@@ -349,13 +398,13 @@ def index_closes(dates):
         return {}
 
 
-def new_state(closes=None):
-    return {"rows": [], "prev": None, "last": None, "closes": closes or {}}
+def new_state(closes=None, spec="SPX"):
+    return {"rows": [], "prev": None, "last": None, "closes": closes or {}, "spec": spec}
 
 
 def track(state, date, df):
     """날짜순으로 하루씩 넣는다. 날짜별 요약(state["rows"])과 마지막 이틀의 전체 계산(state["last"])을 쌓는다."""
-    lv = level(df, date)
+    lv = level(df, date, state.get("spec", "SPX"))
     cl = state["closes"].get(date, {})
     spot = cl.get("spx", lv.get("spot_implied", NAN))
     row, f, pv = {"date": date}, None, state["prev"]
@@ -371,13 +420,37 @@ def track(state, date, df):
     state["prev"] = {"date": date, "lv": lv, "spot": spot, "close": cl}
 
 
+def _side(f, past, beta):
+    """풋 쪽·콜 쪽 요인이 등가격 IV 변화에 딸려 움직이는 평소 관계(beta)에서 벗어난 몫. past = 과거 요인 dict 목록."""
+    atm = f["sticky"] + f["parallel"]
+    p = np.array([(r["sticky"] + r["parallel"], r["put_skew"] + r["down_conv"], r["call_skew"] + r["up_conv"]) for r in past if "sticky" in r], float)
+    side = {"atm": atm, "n": int(len(p))}
+    for name, col, today in (("put", 1, f["put_skew"] + f["down_conv"]), ("call", 2, f["call_skew"] + f["up_conv"])):
+        side[name] = {"today": today, "beta": beta[name], "usual": beta[name] * atm, "excess": today - beta[name] * atm}
+        if len(p) >= 8:
+            side[name]["typ"] = float(np.median(np.abs(p[:, col] - beta[name] * p[:, 0])))
+    return side
+
+
+def _typ(past):
+    """요인별 평소 크기(과거 변화의 절댓값 중앙값). 8번 이상 있을 때만."""
+    typ = {}
+    for k in FACTORS:
+        v = np.array([abs(r[k]) for r in past if k in r and r[k] == r[k]], float)
+        if len(v) >= 8:
+            typ[k] = float(np.median(v))
+    return typ
+
+
 def summary(state):
     """마지막 날의 결과를 보고서·그림·JSON에 쓸 형태로 정리한다."""
     last, rows = state["last"], state["rows"]
+    spec = state.get("spec", "SPX")
+    sp = SPECS[spec]
     if last is None:
-        return {"error": "SPX 자료가 없음"}
+        return {"error": f"{spec} 자료가 없음", "spec": spec}
     lv, f, pv, cl = last["level"], last["factors"], last["prev"], last["close"]
-    out = {"date": last["date"], "prev": pv["date"] if pv else None, "flags": []}
+    out = {"date": last["date"], "prev": pv["date"] if pv else None, "flags": [], "spec": spec, "source": "own"}
     if "error" in lv:
         out["error"] = lv["error"]
         return out
@@ -396,7 +469,7 @@ def summary(state):
         if t["k0_shift"]:
             out["flags"].append(f"만기 {t['exp']:%m-%d}: 선도가 바로 아래 행사가의 호가가 온전하지 않아 그 아래 행사가를 기준(K0)으로 씀")
     d1, d2 = (t["minutes"] / 1440 for t in lv["terms"])
-    if d1 < 22.5 or d2 > 37.5:
+    if sp["rule"] == "weekly30" and (d1 < 22.5 or d2 > 37.5):         # 월물만 쓰는 VVIX·GVZ 방식은 만기 간격이 원래 넓다
         out["flags"].append(f"만기 선택이 평소 범위(23~37일)를 벗어남: 잔존 {d1:.1f}일, {d2:.1f}일 - 주말 만기가 빠졌을 수 있음")
     sh = np.array([r.get("sh_put_wing", NAN) for r in rows], float)
     sh = sh[~np.isnan(sh)]
@@ -409,10 +482,9 @@ def summary(state):
         if "vix" in pv["close"]:
             out["official_prev"] = pv["close"]["vix"]
     for lab, mine, off in (("오늘", lv["vix"], out.get("official")), ("전일", out.get("vix_prev"), out.get("official_prev"))):
-        if mine is not None and off is not None and abs(mine - off) > 0.05:
-            out["flags"].append(f"{lab} 직접 계산한 VIX({mine:.2f})가 공식 종가({off:.2f})와 {mine - off:+.2f} 다름 - 그날 SPX 호가가 마감 시점 값이 아닐 수 있음")
-    if not out["spx_is_close"] or not out.get("spx_prev_is_close", True):
-        out["flags"].append("S&P 500 종가를 받지 못한 날은 옵션에서 역산한 지수 수준으로 등가격 행사가를 정함(종가와 조금 다를 수 있음)")
+        if mine is not None and off is not None and abs(mine - off) > sp["tol"]:
+            out["flags"].append(f"{lab} 직접 계산한 {sp['index']}({mine:.2f})가 공식 종가({off:.2f})와 {mine - off:+.2f} 다름"
+                                f" - 그날 {sp['opt']} 호가가 마감 시점 값이 아닐 수 있음")
     if f is None:
         out["flags"].append("비교할 전일 자료가 없어 변화 요인을 계산하지 못함")
     elif "error" in f:
@@ -424,25 +496,120 @@ def summary(state):
         lo, hi = max(k0[0], k1[0]), min(k0[-1], k1[-1])                # 두 날짜에 모두 있는 범위만(Cboe 도구와 같다)
         m0, m1 = (k0 >= lo) & (k0 <= hi), (k1 >= lo) & (k1 <= hi)
         out["curve"] = {"prev": {"K": k0[m0].tolist(), "iv": (100 * v0[m0]).tolist()}, "today": {"K": k1[m1].tolist(), "iv": (100 * v1[m1]).tolist()}}
-        typ = {}
-        for k in FACTORS:
-            past = np.array([abs(r[k]) for r in rows[:-1] if k in r], float)
-            if len(past) >= 8:
-                typ[k] = float(np.median(past))
+        typ = _typ(rows[:-1])
         if typ:
             out["factor_typ"], out["factor_typ_n"] = typ, int(sum(1 for r in rows[:-1] if "sticky" in r))
-        # 풋 쪽·콜 쪽 요인은 등가격 IV 변화에 딸려 움직인다(VIX가 등가격 IV보다 크게 움직이기 때문). 그 관계에서 벗어난 몫을 따로 낸다
-        atm = f["sticky"] + f["parallel"]
-        past = np.array([(r["sticky"] + r["parallel"], r["put_skew"] + r["down_conv"], r["call_skew"] + r["up_conv"]) for r in rows[:-1] if "sticky" in r], float)
-        side = {"atm": atm, "n": int(len(past))}
-        for name, col, today in (("put", 1, f["put_skew"] + f["down_conv"]), ("call", 2, f["call_skew"] + f["up_conv"])):
-            side[name] = {"today": today, "beta": SIDE_BETA[name], "usual": SIDE_BETA[name] * atm, "excess": today - SIDE_BETA[name] * atm}
-            if len(past) >= 8:
-                side[name]["typ"] = float(np.median(np.abs(past[:, col] - SIDE_BETA[name] * past[:, 0])))
-        out["side"] = side
+        # 풋 쪽·콜 쪽 요인은 등가격 IV 변화에 딸려 움직인다(지수가 등가격 IV보다 크게 움직이기 때문). 그 관계에서 벗어난 몫을 따로 낸다
+        out["side"] = _side(f, rows[:-1], SIDE_BETAS[spec])
         if abs(f["resid"]) > 1e-6:
-            out["flags"].append(f"요인 합계가 VIX 변화와 {f['resid']:+.4f} 어긋남")
+            out["flags"].append(f"요인 합계가 {sp['index']} 변화와 {f['resid']:+.4f} 어긋남")
     return out
+
+
+# ----------------------------------------------------------------------------- Cboe 공식값(SPX만)
+def _get_json(url, timeout=30):
+    import urllib.request
+    with urllib.request.urlopen(url, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def _dash(d):
+    return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+
+
+def cboe_official(d0, d1, timeout=30):
+    """Cboe VIX Decomposition 도구가 읽는 공개 자료(날짜 YYYYMMDD 두 개). 요인(포인트), 등가격 행사가와 IV, 두 날의 30일 곡선, 종가.
+    받지 못하면 {"error": 이유}."""
+    q = f"?date1={_dash(d0)}&date2={_dash(d1)}"
+    try:
+        js = _get_json(CBOE_API + q, timeout)
+        f = {CBOE_KEYS[k]: 100 * float(v) for k, v in js["factors"].items() if k in CBOE_KEYS}
+        if set(f) != set(FACTORS):
+            return {"error": "요인 여섯 개가 다 오지 않음"}
+        fr, to = js["atmPairs"]["from"], js["atmPairs"]["to"]
+        curves = {}
+        for d in (d0, d1):
+            (obj,) = js["interpolatedIVs"][_dash(d)].values()
+            ks = sorted(obj["ivs"], key=float)
+            curves[d] = (np.array([float(k) for k in ks]), np.array([100 * float(obj["ivs"][k]["iv"]) for k in ks]))
+    except Exception as e:
+        return {"error": f"Cboe 공식값을 받지 못함({type(e).__name__}: {str(e)[:80]})"}
+    out = {"factors": f, "curves": curves,
+           "atm": {"strike_prev": float(fr["atm"]), "strike": float(to["atm"]), "iv_prev": 100 * float(fr["iv"]), "iv": 100 * float(to["iv"])}}
+    out["atm"]["iv_prev_at_new"] = out["atm"]["iv_prev"] + f["sticky"]       # 곡선 따라 이동 = 어제 곡선에서 오늘 등가격 자리의 IV - 어제 등가격 IV
+    try:
+        cl = _get_json(CBOE_API + "get_closing_data/" + q, timeout)
+        c = {(t, d.replace("-", "")): float(v) for t, d, v in cl}
+        out["closes"] = {d: {"spx": c.get(("SPX", d)), "vix": c.get(("VIX", d))} for d in (d0, d1)}
+    except Exception:
+        out["closes"] = {}
+    return out
+
+
+def cboe_history(pairs, timeout=30, pause=0.3):
+    """여러 날짜 쌍의 Cboe 공식 요인 [{요인: 포인트}, ...]. 받지 못한 쌍은 건너뛴다(평소 크기를 재는 데만 쓴다)."""
+    import time
+    out = []
+    for d0, d1 in pairs:
+        try:
+            js = _get_json(CBOE_API + f"?date1={_dash(d0)}&date2={_dash(d1)}", timeout)
+            out.append({CBOE_KEYS[k]: 100 * float(v) for k, v in js["factors"].items() if k in CBOE_KEYS})
+        except Exception:
+            pass
+        time.sleep(pause)
+    return out
+
+
+def apply_official(res, off, hist):
+    """자체 계산한 SPX 결과(res)에 Cboe 공식 요인·등가격·곡선을 넣는다. 자체 계산 값은 own_factors로 남긴다(대조용).
+    hist = 과거 날짜 쌍의 공식 요인 목록(평소 크기·평소 관계를 잰다)."""
+    out = dict(res)
+    out["flags"] = list(res.get("flags", []))
+    if "error" in off:
+        out["flags"].append(off["error"] + " - 요인은 자체 계산 값으로 대신함(뒤의 네 요인은 Cboe 값과 계산 방식이 다름)")
+        return out
+    if "factors" in res:
+        out["own_factors"] = res["factors"]
+    out["factors"], out["atm"], out["source"] = off["factors"], off["atm"], "cboe"
+    (k0, v0), (k1, v1) = off["curves"][res["prev"]], off["curves"][res["date"]]
+    lo, hi = max(k0[0], k1[0]), min(k0[-1], k1[-1])
+    m0, m1 = (k0 >= lo) & (k0 <= hi), (k1 >= lo) & (k1 <= hi)
+    out["curve"] = {"prev": {"K": k0[m0].tolist(), "iv": v0[m0].tolist()}, "today": {"K": k1[m1].tolist(), "iv": v1[m1].tolist()}}
+    c0, c1 = off.get("closes", {}).get(res["prev"], {}), off.get("closes", {}).get(res["date"], {})
+    if c1.get("vix") and c0.get("vix"):
+        out["official"], out["official_prev"] = c1["vix"], c0["vix"]
+    if c1.get("spx") and c0.get("spx"):
+        out.update({"spx": c1["spx"], "spx_prev": c0["spx"], "spx_is_close": True, "spx_prev_is_close": True})
+    if "official" in out and "official_prev" in out:
+        out["chg_official"] = out["official"] - out["official_prev"]
+    for k in ("premium", "premium_prev"):
+        out.pop(k, None)
+    typ = _typ(hist)
+    if typ:
+        out["factor_typ"], out["factor_typ_n"] = typ, len(hist)
+    else:
+        out.pop("factor_typ", None)
+    out["side"] = _side(off["factors"], hist, SIDE_BETAS["SPX_CBOE"])
+    tot = sum(off["factors"].values())
+    if "chg_official" in out and abs(tot - out["chg_official"]) > 0.015:
+        out["flags"].append(f"Cboe 요인 합계({tot:+.2f})가 공식 VIX 변화({out['chg_official']:+.2f})와 다름")
+    return out
+
+
+def prev_session(d):
+    """d(YYYYMMDD) 바로 앞 NYSE 거래일. 달력 라이브러리가 없으면 None."""
+    try:
+        import exchange_calendars as xc
+        return xc.get_calendar("XNYS").previous_session(pd.Timestamp(d)).strftime("%Y%m%d")
+    except Exception:
+        return None
+
+
+def official_for(res, dates, n_hist=20):
+    """자체 계산한 SPX 결과에 Cboe 공식값을 넣는다. dates = 계산에 쓴 수집일(오래된 순). 평소 크기는 그 앞 n_hist개 거래일 쌍의 공식값으로 잰다."""
+    past = [d for d in dates if d < res["date"]][-n_hist:]
+    pairs = [(prev_session(d) or p, d) for p, d in zip([None] + past[:-1], past) if (prev_session(d) or p)]
+    return apply_official(res, cboe_official(res["prev"], res["date"]), cboe_history(pairs))
 
 
 def clean(o):
@@ -466,27 +633,41 @@ def _ymd(d):
     return f"{d[:4]}-{d[4:6]}-{d[6:]}"
 
 
+def _k(x):
+    """행사가 표기: 정수면 소수점 없이, 아니면 한 자리."""
+    return f"{x:,.0f}" if abs(x - round(x)) < 1e-9 else f"{x:,.1f}"
+
+
+HEAD = {"SPX": "VIX 분해", "VIX": "VVIX식 분해(VIX 옵션, 자체 계산)", "GLD": "GVZ식 분해(GLD 옵션, 자체 계산)"}
+
+
 def report(res):
-    L = [f"\n== VIX 분해 | {res.get('date', '-')} (비교 대상 {res.get('prev') or '-'})"]
+    spec = res.get("spec", "SPX")
+    sp = SPECS[spec]
+    idx, off = sp["index"], res.get("source") == "cboe"
+    L = [f"\n== {HEAD[spec]}{'(Cboe 공식값)' if off else ''} | {res.get('date', '-')} (비교 대상 {res.get('prev') or '-'})"]
     if "error" in res:
-        return "\n".join(L + [f"  [확인 필요] VIX를 계산하지 못함: {res['error']}"])
+        return "\n".join(L + [f"  [확인 필요] {idx}식 지수를 계산하지 못함: {res['error']}"])
     has_prev = "vix_prev" in res
-    s = f"  [직접 계산한 VIX] {res['vix']:.2f}" + (f" (전일 {res['vix_prev']:.2f}, {res['chg']:+.2f})" if has_prev else "")
+    s = f"  [직접 계산한 {idx}] {res['vix']:.2f}" + (f" (전일 {res['vix_prev']:.2f}, {res['chg']:+.2f})" if has_prev else "")
     if "official" in res:
         s += f" | 공식 종가 {res['official']:.2f}(차이 {res['vix'] - res['official']:+.2f})"
-        if "official_prev" in res:
+        if "official_prev" in res and has_prev:
             s += f", 전일 {res['official_prev']:.2f}(차이 {res['vix_prev'] - res['official_prev']:+.2f})"
     else:
         s += " | 공식 종가 대조 못함"
     L.append(s)
     if has_prev:
         lab = "종가" if res["spx_is_close"] and res["spx_prev_is_close"] else "옵션에서 역산한 수준"
-        L.append(f"  [S&P 500 {lab}] {res['spx_prev']:,.2f} → {res['spx']:,.2f} ({res['spx'] - res['spx_prev']:+,.2f}, {(res['spx'] / res['spx_prev'] - 1) * 100:+.2f}%)")
+        L.append(f"  [{sp['under']} {lab}] {res['spx_prev']:,.2f} → {res['spx']:,.2f} ({res['spx'] - res['spx_prev']:+,.2f}, {(res['spx'] / res['spx_prev'] - 1) * 100:+.2f}%)")
     if "factors" in res:
         f, a = res["factors"], res["atm"]
-        L.append(f"  [VIX 변화 {res['chg']:+.2f}의 요인] " + " | ".join(f"{NAMES[k]} {f[k]:+.2f}" for k in FACTORS) + f" | 합 {sum(f.values()):+.2f}")
+        chg = res.get("chg_official", res["chg"]) if off else res["chg"]
+        L.append(f"  [{idx} 변화 {chg:+.2f}의 요인{'(Cboe 공식값)' if off else ''}] " + " | ".join(f"{NAMES[k]} {f[k]:+.2f}" for k in FACTORS)
+                 + f" | 합 {sum(f.values()):+.2f}")
         if "factor_typ" in res:
-            L.append(f"    평소 크기(최근 {res['factor_typ_n']}번 변화의 절댓값 중앙값): " + " | ".join(f"{NAMES[k]} {v:.2f}" for k, v in res["factor_typ"].items()))
+            src = "Cboe 공식값의 " if off else ""
+            L.append(f"    평소 크기(최근 {res['factor_typ_n']}번 {src}변화의 절댓값 중앙값): " + " | ".join(f"{NAMES[k]} {v:.2f}" for k, v in res["factor_typ"].items()))
         if "side" in res:
             sd = res["side"]
             typ = (f", 평소 벗어나는 크기 {sd['put']['typ']:.2f}", f", 평소 벗어나는 크기 {sd['call']['typ']:.2f}") if "typ" in sd["put"] else ("", "")
@@ -494,16 +675,19 @@ def report(res):
                      f"풋 쪽(풋 스큐+하방 볼록성) {sd['put']['usual']:+.2f}, 콜 쪽(콜 스큐+상방 볼록성) {sd['call']['usual']:+.2f}"
                      f" | 오늘 풋 쪽 {sd['put']['today']:+.2f}(평소 관계보다 {sd['put']['excess']:+.2f}{typ[0]}),"
                      f" 콜 쪽 {sd['call']['today']:+.2f}(평소 관계보다 {sd['call']['excess']:+.2f}{typ[1]})")
-        L.append(f"  [등가격] 행사가 {a['strike_prev']:,.0f} → {a['strike']:,.0f} | 30일 곡선의 등가격 IV {a['iv_prev']:.2f}% → {a['iv']:.2f}%"
+        L.append(f"  [등가격] 행사가 {_k(a['strike_prev'])} → {_k(a['strike'])} | 30일 곡선의 등가격 IV {a['iv_prev']:.2f}% → {a['iv']:.2f}%"
                  f" (어제 곡선에서 오늘 등가격 행사가의 IV {a['iv_prev_at_new']:.2f}%)")
-        for lab, key, v, at in (("오늘", "premium", res["vix"], a["iv"]), ("전일", "premium_prev", res["vix_prev"], a["iv_prev"])):
-            L.append(f"  [VIX - 등가격 IV, {lab}] {v - at:+.2f} = " + " | ".join(f"{NAMES[k]} {res[key][k]:+.2f}" for k in FACTORS[2:]))
+        if off and "own_factors" in res:
+            L.append("  [참고: 자체 계산 요인] " + " | ".join(f"{NAMES[k]} {res['own_factors'][k]:+.2f}" for k in FACTORS))
+        for lab, key, v, at in (("오늘", "premium", res["vix"], a["iv"]), ("전일", "premium_prev", res.get("vix_prev"), a["iv_prev"])):
+            if key in res and v is not None:
+                L.append(f"  [{idx} - 등가격 IV, {lab}] {v - at:+.2f} = " + " | ".join(f"{NAMES[k]} {res[key][k]:+.2f}" for k in FACTORS[2:]))
     L.append("  [계산에 쓴 만기] " + " | ".join(
         f"{t['exp'][5:]} {t['root']}(잔존 {t['days']:.1f}일, 변동성 {t['vol']:.2f}, 비중 {t['weight'] * 100:.0f}%, 풋 {t['n_put']}·콜 {t['n_call']}개,"
-        f" 행사가 {t['k_lo']:,.0f}~{t['k_hi']:,.0f})" for t in res["terms"]))
-    sp = res.get("share_prev", {})
-    L.append("  [VIX 구성: 델타 구간별 기여(포인트)와 비중] " + " | ".join(
-        f"{GROUPS[k]} {res['points'][k]:.2f}({res['share'][k] * 100:.1f}%" + (f", 전일 {sp[k] * 100:.1f}%" if k in sp else "") + ")" for k in GROUPS))
+        f" 행사가 {_k(t['k_lo'])}~{_k(t['k_hi'])})" for t in res["terms"]))
+    shp = res.get("share_prev", {})
+    L.append(f"  [{idx} 구성: 델타 구간별 기여(포인트)와 비중] " + " | ".join(
+        f"{GROUPS[k]} {res['points'][k]:.2f}({res['share'][k] * 100:.1f}%" + (f", 전일 {shp[k] * 100:.1f}%" if k in shp else "") + ")" for k in GROUPS))
     if "share_rank" in res:
         L.append(f"    풋 10델타 미만 비중은 최근 {res['share_rank']['n']}일 중 {res['share_rank']['rank']}번째로 높음")
     for x in res["flags"]:
@@ -546,6 +730,46 @@ TXT = {
 }
 TAG = {"sticky": "STICKY STRIKE", "parallel": "PARALLEL SHIFT", "put_skew": "PUT SKEW", "call_skew": "CALL SKEW",
        "down_conv": "DOWNSIDE CONVEXITY", "up_conv": "UPSIDE CONVEXITY"}
+# 기초자산·자료 출처별로 바꾸는 글자(나머지는 TXT 그대로)
+TXT_SPEC = {
+    "ko": {
+        ("SPX", "cboe"): {"sub": "Cboe VIX Decomposition 도구의 공식값",
+                          "fs_put_skew": "풋(델타 약 15~45)의 IV가 평행 이동보다 더 오른 몫", "fs_call_skew": "콜(델타 약 15~45)의 IV가 평행 이동보다 더 오른 몫",
+                          "fs_down_conv": "먼 풋(델타 약 1~15)의 IV가 그보다 더 오른 몫", "fs_up_conv": "먼 콜(델타 약 1~15)의 IV가 그보다 더 오른 몫",
+                          "foot": "자료: Cboe VIX Decomposition 도구(요인·곡선·종가) · 대조: SPX 옵션 마감 호가로 직접 계산한 VIX"},
+        ("VIX", "own"): {"title": "VIX 옵션 변동성 분해", "sub": "VIX 옵션 마감 호가로 직접 계산한 30일 변동성 지수(VVIX와 같은 방식)",
+                         "spx": "VIX", "vix": "VVIX", "fac": "VVIX 변화 요인",
+                         "note_off": "직접 계산한 값 {a} → {b} (공식 VVIX와의 차이 {da}, {db})", "note_own": "VVIX 열은 직접 계산한 값이다(공식 VVIX를 받지 못함)",
+                         "note_spot": "VIX는 옵션에서 역산한 수준이다(종가를 받지 못함)",
+                         "foot": "자료: Cboe 지연 시세(VIX 옵션 마감 호가) · 방법: Cboe VIX 산출 방법론을 VIX 옵션에 적용, 요인은 이 스크립트의 정의"},
+        ("GLD", "own"): {"title": "GLD 옵션 변동성 분해", "sub": "GLD 옵션 마감 호가로 직접 계산한 30일 변동성 지수(GVZ와 같은 방식)",
+                         "spx": "GLD", "vix": "GVZ", "fac": "GVZ 변화 요인",
+                         "note_off": "직접 계산한 값 {a} → {b} (공식 GVZ와의 차이 {da}, {db})", "note_own": "GVZ 열은 직접 계산한 값이다(공식 GVZ를 받지 못함)",
+                         "note_spot": "GLD는 옵션에서 역산한 수준이다(종가를 받지 못함)",
+                         "foot": "자료: Cboe 지연 시세(GLD 옵션 마감 호가) · 방법: Cboe VIX 산출 방법론을 GLD 옵션에 적용, 요인은 이 스크립트의 정의"},
+    },
+    "en": {
+        ("SPX", "cboe"): {"sub": "Official values from the Cboe VIX Decomposition tool",
+                          "foot": "Data: Cboe VIX Decomposition tool (factors, curves, closes). Check: VIX replicated from SPX closing quotes"},
+        ("VIX", "own"): {"title": "VIX options volatility decomposition", "sub": "30-day volatility index from VIX option closing quotes (VVIX method)",
+                         "spx": "VIX", "vix": "VVIX", "fac": "VVIX decomposition factors",
+                         "foot": "Data: Cboe delayed quotes (VIX option closing quotes). Method: Cboe VIX methodology on VIX options"},
+        ("GLD", "own"): {"title": "GLD options volatility decomposition", "sub": "30-day volatility index from GLD option closing quotes (GVZ method)",
+                         "spx": "GLD", "vix": "GVZ", "fac": "GVZ decomposition factors",
+                         "foot": "Data: Cboe delayed quotes (GLD option closing quotes). Method: Cboe VIX methodology on GLD options"},
+    },
+}
+
+
+def _labels(lang, res):
+    """그림에 쓸 글자: TXT[lang]에 기초자산·자료 출처별 바꿀 것을 덮어쓴 사본."""
+    L = {k: (dict(v) if isinstance(v, dict) else v) for k, v in TXT[lang].items()}
+    for k, v in TXT_SPEC[lang].get((res.get("spec", "SPX"), res.get("source", "own")), {}).items():
+        if k.startswith("fs_"):
+            L["fs"][k[3:]] = v
+        else:
+            L[k] = v
+    return L
 
 
 def _font():
@@ -596,13 +820,15 @@ def chart(res, path):
     if "error" in res:
         raise ValueError(res["error"])
     font = _font()
-    L = TXT["ko" if font else "en"]
+    L = _labels("ko" if font else "en", res)
     fam = font or "DejaVu Sans"
     has_f = "factors" in res
     W, DPI = 1080, 150
     pt = 72 / DPI                                                     # 픽셀 → 포인트
     # 표에 들어갈 줄을 먼저 정한다(그림 높이가 여기서 정해진다)
-    off = "official" in res and (not has_f or "official_prev" in res)   # VIX 열에 공식 종가를 쓸 수 있는가
+    has_off = "official" in res and (not has_f or "official_prev" in res)   # 공식 값과 대조할 수 있는가
+    # 표의 지수 열: SPX는 공식 VIX 종가(요인 합계와 같다). VIX·GLD는 직접 계산한 값(요인 합계가 그 변화이고, 공식 값과는 방법 차이만큼 다르다)
+    off = has_off and res.get("spec", "SPX") == "SPX"
     v1 = res["official"] if off else res["vix"]
     v0 = (res["official_prev"] if off else res["vix_prev"]) if "vix_prev" in res else None
     s1, s0 = res["spx"], res.get("spx_prev")
@@ -612,7 +838,7 @@ def chart(res, path):
     if v0 is not None:
         rows += [(L["abs"], _num(s1 - s0, comma=True), _num(v1 - v0)), (L["pct"], _num((s1 / s0 - 1) * 100) + "%", _num((v1 / v0 - 1) * 100) + "%")]
     notes = [L["note_off"].format(a=f"{res['vix_prev']:.2f}", b=f"{res['vix']:.2f}", da=_num(res["vix_prev"] - res["official_prev"]),
-                                  db=_num(res["vix"] - res["official"])) if off and has_f else None if off else L["note_own"],
+                                  db=_num(res["vix"] - res["official"])) if has_off and has_f else None if has_off else L["note_own"],
              None if spot_ok else L["note_spot"]]
     notes = [n for n in notes if n]
     RH, FH, P1, P2 = 58, 82, 430, 360                                  # 표의 줄 높이, 요인 줄 높이, 곡선 그림 두 개의 높이
@@ -672,7 +898,7 @@ def chart(res, path):
         text(70, y - 22, L["fac"], 24, INK, "bold")
         rule(y)
         at = res["atm"]
-        fmt = {"a0": f"{at['strike_prev']:,.0f}", "a1": f"{at['strike']:,.0f}", "v0": f"{at['iv_prev']:.2f}", "v01": f"{at['iv_prev_at_new']:.2f}", "v1": f"{at['iv']:.2f}"}
+        fmt = {"a0": _k(at["strike_prev"]), "a1": _k(at["strike"]), "v0": f"{at['iv_prev']:.2f}", "v01": f"{at['iv_prev_at_new']:.2f}", "v1": f"{at['iv']:.2f}"}
         for k in FACTORS:
             t = text(70, y + 38, L["f"][k], 25, INK, "medium")
             if font:
@@ -716,7 +942,7 @@ def chart(res, path):
             text(left - 14, ptop + (yhi - t) * sy + 8, f"{t:g}", 21, MUTED, ha="right")
         for t in xt:
             ax.plot([t, t], [ylo, yhi], color=GRID, lw=1.0 * pt)
-            text(left + (t - xlo) * sx, ptop + ph + 32, f"{t:,.0f}", 21, MUTED, ha="center")
+            text(left + (t - xlo) * sx, ptop + ph + 32, _k(t), 21, MUTED, ha="center")
         for k, v, col in ((kp, vp, C_PREV), (kt, vt, C_TODAY)):
             m = (k >= xlo) & (k <= xhi)
             ax.plot(k[m], v[m], color=col, lw=4.6 * pt, solid_joinstyle="round", solid_capstyle="round")
@@ -750,10 +976,13 @@ def chart(res, path):
             tag(Tp, L["atm"].format(v=f"{a['iv']:.1f}"), above)
         return ptop + ph, hollow
 
-    xlo, xhi = 500 * math.floor(min(kp[0], kt[0]) / 500), 500 * math.ceil(max(kp[-1], kt[-1]) / 500)
-    step = 1000 if xhi - xlo > 4000 else 500
-    ymax = 20 * math.ceil(max(vp.max(), vt.max(), 1) / 20)
-    yb, _ = plot(top + 132, P1, xlo, xhi, 0, ymax, [t for t in range(int(xlo), int(xhi) + 1, step)], list(range(0, int(ymax) + 1, 20)), False)
+    xt, step = _ticks(min(kp[0], kt[0]), max(kp[-1], kt[-1]), 6)          # 기초자산마다 행사가 범위가 달라 눈금을 그때그때 정한다
+    xlo, xhi = step * math.floor(min(kp[0], kt[0]) / step), step * math.ceil(max(kp[-1], kt[-1]) / step)
+    xt = [float(round(xlo + i * step, 10)) for i in range(int(round((xhi - xlo) / step)) + 1)]
+    yt, ystep = _ticks(0, max(vp.max(), vt.max(), 1), 5)
+    ymax = ystep * math.ceil(max(vp.max(), vt.max(), 1) / ystep)
+    yt = [float(round(i * ystep, 10)) for i in range(int(round(ymax / ystep)) + 1)]
+    yb, _ = plot(top + 132, P1, xlo, xhi, 0, ymax, xt, yt, False)
     text(left + pw / 2, yb + 68, L["x"], 21, INK2, ha="center")
     text(64, top + 132 + P1 / 2, L["y"], 21, INK2, ha="center", va="center", rotation=90)
 
@@ -808,16 +1037,19 @@ def run(a):
         print("[오류] 보관본이 없음")
         return 1
     dates = dates[-(a.lookback + 1):]
-    st = new_state({} if a.no_yf else index_closes(dates))
+    t = a.ticker.upper()
+    st = new_state({} if a.no_yf else index_closes(dates, t), t)
     for d in dates:
         try:
-            day = load_day(a.archive_dir, d, ["SPX"])
+            day = load_day(a.archive_dir, d, [t])
         except Exception as e:
             print(f"[확인 필요] {d} 보관본을 읽지 못함: {type(e).__name__}")
             continue
-        if "SPX" in day and len(day["SPX"]):
-            track(st, d, day["SPX"])
+        if t in day and len(day[t]):
+            track(st, d, day[t])
     res = summary(st)
+    if t == "SPX" and a.cboe and "error" not in res and res.get("prev"):
+        res = official_for(res, [r["date"] for r in st["rows"]])
     print(report(res))
     if a.out_json:
         with open(a.out_json, "w", encoding="utf-8") as f:
@@ -905,8 +1137,10 @@ def self_test():
 def main():
     if "--self-test" in sys.argv:
         return self_test()
-    p = argparse.ArgumentParser(description="보관본의 SPX 옵션 호가로 VIX를 직접 계산하고 하루 변화를 여섯 요인으로 나눈다")
+    p = argparse.ArgumentParser(description="보관본의 옵션 호가로 VIX식 지수(SPX→VIX, VIX 옵션→VVIX, GLD→GVZ)를 직접 계산하고 하루 변화를 여섯 요인으로 나눈다")
     p.add_argument("--archive-dir", default="data/daily", help="quotes_YYYYMMDD.tar.gz가 있는 폴더")
+    p.add_argument("--ticker", default="SPX", choices=sorted(SPECS), help="기초자산(SPX, VIX, GLD)")
+    p.add_argument("--cboe", action="store_true", help="SPX의 요인·등가격·곡선을 Cboe VIX Decomposition 도구의 공식값으로 쓴다")
     p.add_argument("--date", help="기준일 YYYYMMDD(생략하면 최신 보관본)")
     p.add_argument("--lookback", type=int, default=20, help="'평소 크기'를 잴 때 쓸 과거 수집일 수")
     p.add_argument("--png", help="그림을 저장할 경로")

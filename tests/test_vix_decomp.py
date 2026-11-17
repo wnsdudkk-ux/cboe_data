@@ -128,5 +128,78 @@ class Helpers(unittest.TestCase):
         self.assertEqual(vd._num(2.0, 0, sign=False), "2")
 
 
+def _exps(rows):
+    import pandas as pd
+    return pd.DataFrame({"exp": pd.to_datetime([e for e, _ in rows]), "root": [r for _, r in rows]})
+
+
+class OtherUnderlyings(unittest.TestCase):
+    """VIX 옵션(VVIX 방식)·GLD 옵션(GVZ 방식)의 만기 선택과 이름표, Cboe 공식값 끼워 넣기."""
+
+    def test_vix_options_use_first_two_monthlies_with_8_days(self):
+        e = _exps([("2026-11-18", "VIX"), ("2026-11-24", "VIXW"), ("2026-12-09", "VIXW"), ("2026-12-16", "VIX"), ("2027-01-20", "VIX")])
+        got = [(f"{x:%m-%d}", r) for x, r in vd.pick_terms(e, "20261113", "VIX")]
+        self.assertEqual(got, [("12-16", "VIX"), ("01-20", "VIX")])        # 11-18은 5일 남아 건너뛰고, 주간물(VIXW)은 쓰지 않는다
+        got = [(f"{x:%m-%d}", r) for x, r in vd.pick_terms(e, "20261109", "VIX")]
+        self.assertEqual(got, [("11-18", "VIX"), ("12-16", "VIX")])        # 9일 남으면 근월로 쓴다
+
+    def test_gld_uses_monthlies_around_30_days_or_extrapolates(self):
+        e = _exps([("2026-11-16", "GLD"), ("2026-11-20", "GLD"), ("2026-11-27", "GLD"), ("2026-12-11", "GLD"), ("2026-12-18", "GLD"),
+                   ("2027-01-15", "GLD")])
+        got = [f"{x:%m-%d}" for x, _ in vd.pick_terms(e, "20261102", "GLD")]
+        self.assertEqual(got, ["11-20", "12-18"])                          # 월물(셋째 금요일) 18일·46일
+        got = [f"{x:%m-%d}" for x, _ in vd.pick_terms(e, "20261116", "GLD")]
+        self.assertEqual(got, ["12-18", "01-15"])                          # 근월 월물이 4일 남음 → 30일 넘는 월물 둘로 바깥 보간
+
+    def test_spx_rule_unchanged(self):
+        e = _exps([("2026-12-11", "SPXW"), ("2026-12-16", "SPXW"), ("2026-12-18", "SPX"), ("2026-12-18", "SPXW")])
+        self.assertEqual([(f"{x:%m-%d}", r) for x, r in vd.pick_terms(e, "20261113")], [("12-11", "SPXW"), ("12-18", "SPX")])
+
+    def test_atm_step_per_underlying(self):
+        self.assertEqual(vd.atm_strike(19.73, vd.SPECS["VIX"]["step"]), 19.5)
+        self.assertEqual(vd.atm_strike(354.6, vd.SPECS["GLD"]["step"]), 355.0)
+
+    def _res(self, spec="SPX"):
+        f = {"sticky": 1.98, "parallel": 1.14, "put_skew": 0.43, "call_skew": -0.55, "down_conv": 0.73, "up_conv": -0.12}
+        return {"date": "20261116", "prev": "20261113", "spec": spec, "source": "own", "flags": [], "vix": 22.91, "vix_prev": 19.30, "chg": 3.61,
+                "spx": 7416.59, "spx_prev": 7561.67, "spx_is_close": True, "spx_prev_is_close": True, "factors": f,
+                "atm": {"strike_prev": 7565.0, "strike": 7425.0, "iv_prev": 14.97, "iv_prev_at_new": 16.96, "iv": 18.09},
+                "premium": {k: 0.0 for k in vd.FACTORS[2:]}, "premium_prev": {k: 0.0 for k in vd.FACTORS[2:]},
+                "terms": [{"exp": "2026-12-11", "root": "SPXW", "days": 25.0, "vol": 23.2, "weight": 0.2, "F": 7420.0, "K0": 7420.0, "n_put": 1,
+                           "n_call": 1, "k_lo": 2800.0, "k_hi": 8800.0}],
+                "points": {k: 1.0 for k in vd.GROUPS}, "share": {k: 0.25 for k in vd.GROUPS}}
+
+    def test_apply_official_replaces_factors_and_keeps_own(self):
+        res = self._res()
+        k = np.array([7000.0, 7440.0, 8000.0])
+        off = {"factors": {"sticky": 1.79, "parallel": 1.30, "put_skew": -0.06, "call_skew": 0.44, "down_conv": -0.14, "up_conv": 0.28},
+               "atm": {"strike_prev": 7565.0, "strike": 7440.0, "iv_prev": 14.98, "iv": 18.07, "iv_prev_at_new": 16.77},
+               "curves": {"20261113": (k, np.array([20.0, 16.8, 13.0])), "20261116": (k, np.array([21.0, 18.1, 14.0]))},
+               "closes": {"20261113": {"spx": 7561.67, "vix": 19.30}, "20261116": {"spx": 7416.59, "vix": 22.91}}}
+        hist = [{f: 0.1 * (i + 1) for f in vd.FACTORS} for i in range(10)]
+        out = vd.apply_official(res, off, hist)
+        self.assertEqual(out["source"], "cboe")
+        self.assertAlmostEqual(out["factors"]["call_skew"], 0.44)
+        self.assertAlmostEqual(out["own_factors"]["call_skew"], -0.55)
+        self.assertAlmostEqual(out["chg_official"], 3.61, places=9)
+        self.assertAlmostEqual(out["factor_typ"]["sticky"], 0.55, places=9)
+        self.assertNotIn("premium", out)
+        self.assertIn("Cboe 공식값", vd.report(out))
+        self.assertFalse(out["flags"], out["flags"])
+
+    def test_apply_official_falls_back_with_flag(self):
+        out = vd.apply_official(self._res(), {"error": "Cboe 공식값을 받지 못함(URLError)"}, [])
+        self.assertEqual(out["source"], "own")
+        self.assertTrue(any("자체 계산 값으로 대신함" in x for x in out["flags"]))
+
+    def test_report_and_labels_follow_underlying(self):
+        for spec, head, col in (("VIX", "VVIX식 분해", "VVIX"), ("GLD", "GVZ식 분해", "GVZ")):
+            r = self._res(spec)
+            self.assertIn(head, vd.report(r))
+            L = vd._labels("ko", r)
+            self.assertEqual(L["vix"], col)
+            self.assertEqual(L["spx"], spec)
+
+
 if __name__ == "__main__":
     unittest.main()

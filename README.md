@@ -67,14 +67,15 @@ python -m unittest discover -s tests                      # 단위테스트 (117
 쌓인 보관본 두 날짜(최신과 그 직전 수집일)를 비교해 옵션 시장이 하루 사이 어떻게
 달라졌는지 수치로 뽑는다. 압축을 풀지 않고 필요한 종목의 CSV만 바로 읽는다.
 claude.ai 예약 작업(화~토 아침 KST)이 이 스크립트와 `gex.py`를 받아 실행하고, 글 보고와 함께
-그림 세 장(VIX 분해, GEX, GEX 추이)을 보낸다.
+그림 다섯 장(분해 세 장: SPX는 Cboe 공식값, VIX 옵션·GLD 옵션은 자체 계산 / GEX, GEX 추이)을 보낸다.
 
 ```bash
 # 저장소 전체(1.5GB 이상)를 받지 않고 스크립트와 최근 21일치 보관본만 받는다 (약 380MB, 20초)
 git clone --depth 1 --filter=blob:none --no-checkout https://github.com/wnsdudkk-ux/cboe_data.git && cd cboe_data
 git checkout HEAD -- option_sentiment.py vix_decomp.py $(git ls-tree -r --name-only HEAD data/daily | grep -E 'quotes_[0-9]{8}\.tar\.gz$' | sort | tail -21)
 pip install -r requirements-analysis.txt                   # pandas, numpy + 선택(휴장일 판정, 종가 대조, 그림)
-python option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json --vix-chart vix.png
+python option_sentiment.py --archive-dir data/daily --tickers SPX VIX GLD --out-json out.json --decomp-dir . --cboe-decomp
+#   → decomp_spx.png(Cboe 공식값), decomp_vix.png, decomp_gld.png. --cboe-decomp가 없으면 SPX도 자체 계산
 python option_sentiment.py --archive-dir data/daily --tickers QQQ --date 20261113   # 날짜 지정
 python option_sentiment.py --self-test && python vix_decomp.py --self-test          # 접속 없이 계산 로직 점검
 ```
@@ -118,14 +119,39 @@ python option_sentiment.py --self-test && python vix_decomp.py --self-test      
 
 보관본의 SPX 옵션 호가만으로 VIX를 다시 계산하고, 하루 변화를 Cboe의
 [VIX Decomposition 도구](https://www.cboe.com/tradable-products/vix/vix-decomposition/)와
-같은 여섯 요인으로 나눈다. `option_sentiment.py`가 SPX를 분석할 때 함께 부르고
-(`--vix-chart 경로`를 주면 그림도 만든다), 단독으로도 돈다.
+같은 여섯 요인으로 나눈다. 같은 계산을 VIX 옵션(VVIX 방식)과 GLD 옵션(GVZ 방식)에도 쓴다.
+`option_sentiment.py`가 SPX·VIX·GLD를 분석할 때 함께 부르고(`--decomp-dir 폴더`를 주면
+종목마다 그림을 만든다), 단독으로도 돈다.
 
 ```bash
 python vix_decomp.py --archive-dir data/daily --png vix.png --out-json vix.json   # 최신 보관본과 그 직전 수집일
+python vix_decomp.py --archive-dir data/daily --cboe --png vix.png                 # SPX 요인을 Cboe 공식값으로
+python vix_decomp.py --archive-dir data/daily --ticker VIX --png vvix.png          # VIX 옵션 → VVIX식 지수
+python vix_decomp.py --archive-dir data/daily --ticker GLD --png gvz.png           # GLD 옵션 → GVZ식 지수
 python vix_decomp.py --archive-dir data/daily --date 20261105 --png vix.png        # 날짜 지정
 python vix_decomp.py --from-json out.json --png vix.png                            # 계산해 둔 결과로 그림만 다시
 ```
+
+**세 기초자산.** 계산 방법은 같고 만기 고르는 규칙과 시각만 다르다. 규칙은 공식 지수와
+2026-07-06~11-16의 87일을 맞대어 골랐다(자료 시점이 어긋난 09-23 제외).
+
+| | 쓰는 옵션과 만기 | 호가 시점 | 공식 지수와의 차이(중앙값 / 90%) |
+|---|---|---|---|
+| SPX → VIX | 주말 만기(금요일) 중 잔존 30일 이하의 마지막과 그다음 | 16:15 | 0.00 / 0.01 |
+| VIX 옵션 → VVIX | 월물(VIX)만, 잔존 8일 이상인 첫 두 만기(주간물 VIXW 제외) | 16:15 | 0.01 / 0.04 |
+| GLD 옵션 → GVZ | 월물(셋째 금요일)만, 잔존 8~30일의 마지막과 30일 넘는 첫 만기. 30일 이하가 없으면 30일 넘는 첫 두 만기로 바깥 보간 | 16:00 | 0.02 / 0.12 |
+
+VVIX는 주간물까지 넣고 30일을 사이에 둔 두 만기를 쓰면 차이가 중앙값 1.3, 90% 4.4로
+커진다. 공식 VVIX가 예전 VIX 방법론(월물, 8일 미만이면 다음 달로)을 쓰기 때문이다.
+VIX·GLD의 요인 여섯 개는 아래 SPX와 같은 정의로 이 스크립트가 계산한 것이다(Cboe는 이 둘의
+분해를 내지 않는다). 등가격 행사가는 30일 선도가를 VIX 옵션은 0.5, GLD는 1 단위로 반올림한다.
+
+**SPX의 Cboe 공식값(`--cboe`, `--cboe-decomp`).** 도구 페이지가 읽는 공개 자료
+(`https://www-api.cboe.com/vix_decomposition/?date1=…&date2=…`, 종가는 `…/get_closing_data/?…`)에서
+요인 여섯 개, 두 날의 등가격 행사가와 IV, 30일 곡선, S&P 500·VIX 종가를 받아 보고와 그림에 쓴다.
+평소 크기는 그 앞 20개 거래일 쌍의 공식값으로 잰다(실행마다 21번 요청, 0.3초 간격).
+자체 계산한 VIX와 요인은 대조용으로 함께 적고, 공식값을 받지 못하면 자체 계산 값으로 대신하며
+`[확인 필요]`로 알린다.
 
 **VIX 계산.** Cboe 방법론 문서의 규칙을 그대로 따른다: 잔존 30일 이하에서 가장 먼
 주말 만기와 그다음 주말 만기(셋째 금요일은 아침 결제 SPX, 그 밖은 SPXW. 금요일이
@@ -233,6 +259,8 @@ IV가 등가격 IV와 같다면) 기여했을 포인트. 네 몫을 더하면 �
 (전체 범위, 등가격 부근 확대)을 세로로 놓은 PNG 한 장(가로 1080픽셀)이다. 한글 글꼴이
 없는 환경에서는 글자가 영어로 바뀐다. S&P 500·VIX 종가는 야후 파이낸스에서 받고,
 받지 못하면 옵션에서 역산한 지수 수준과 직접 계산한 VIX를 대신 쓴다(그림에 표시).
+Cboe 공식값을 쓰면 표의 VIX·S&P 500과 곡선도 도구의 값이다. VIX 옵션·GLD 그림의 표는
+기초자산(VIX, GLD) 종가와 직접 계산한 VVIX·GVZ식 지수이고, 공식 지수와의 차이를 아래에 적는다.
 
 ## SPX 감마 노출(GEX) — gex.py
 
@@ -370,6 +398,8 @@ GEX(전체·7일·30일), 콜·풋 합계, 합계 대비 %, 감마 플립, 콜 �
 - 지침(Instructions)은 루틴 편집 화면 참고 — `collect.py` 실행 후 `OK:`일 때만
   `data/daily`를 커밋·푸시한다. 지수 종가 표와 GEX 추이 표도 이 폴더에 있어 함께 올라간다
   (루틴 지침을 고칠 필요가 없다).
+- 분석 예약 작업(옵션 시장 분석)은 SPX 분해의 공식값을 받으려고 `www-api.cboe.com`에 접속한다
+  (`option_sentiment.py --cboe-decomp`). 막히면 SPX 분해는 자체 계산으로 대신하고 `[확인 필요]`로 알린다.
 
 ## 용량 전망과 관리
 
