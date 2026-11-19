@@ -31,6 +31,11 @@ claude.ai 클라우드 루틴(매일 07:30 KST)이 실행하는 스크립트이�
   단 샌드박스 이그레스 차단(x-deny-reason 헤더가 붙은 403, 또는 프록시가 CONNECT를
   403으로 거부 = URLError 'Tunnel connection failed: 403')은 환경설정 오류이므로,
   아직 성공이 하나도 없으면 막힌 호스트 이름과 함께 즉시 중단한다.
+- Cloudflare 차단 구분(2026-11-19 추가): CBOE 앞단 Cloudflare가 접속 IP를 막으면 모든 종목이
+  403 + 'Sorry, you have been blocked' HTML을 받는다. 예전에는 이것을 '없는 심볼' 403으로 보고
+  no_data·핵심 종목 실패로 30개를 센 뒤에야 막연한 'ERROR: 성공 0'으로 끝났다. 이제 첫 종목에서
+  차단 IP·Ray ID와 함께 'ERROR:'로 즉시 멈춘다. 허용 도메인으로는 못 고치며, 시간이 지나거나
+  다른 IP에서 실행해야 풀린다.
 - 원자적 쓰기: 아카이브는 .tmp에 만든 뒤 os.replace()로 교체한다.
 - 곁들이는 표(2026-11 추가): 수집을 마치면 data/daily/ 아래 표 두 개에 그날 줄을 넣는다. 루틴이
   data/daily/ 를 통째로 커밋하므로 아카이브와 함께 올라간다.
@@ -54,6 +59,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -135,6 +141,13 @@ class NoDataError(Exception):
 class EgressBlockedError(RuntimeError):
     """클라우드 샌드박스가 도메인을 차단(403 + x-deny-reason, 또는 프록시 CONNECT 403).
     환경설정 문제이므로 성공이 하나도 없는 상태에서 걸리면 전체 수집을 즉시 중단한다."""
+
+
+class SiteBlockedError(RuntimeError):
+    """CBOE 앞단의 Cloudflare 보안이 이 환경의 접속 IP 자체를 막았다(403 + 'Sorry, you have
+    been blocked' 차단 페이지). 실측 2026-11-19: 클라우드 환경에서 모든 종목이 이 페이지를 받았다.
+    '없는 심볼' 403(no_data)과 다르며, 몇 번 다시 받아도 풀리지 않으므로 성공이 하나도 없는
+    상태에서 걸리면 전체 수집을 즉시 중단한다. 허용 도메인 설정으로는 고칠 수 없다."""
 
 
 class SystemicFailureError(RuntimeError):
@@ -367,6 +380,39 @@ def _is_proxy_connect_403(err):
             and str(err.reason).startswith("Tunnel connection failed: 403"))
 
 
+_CF_BLOCK_MARKERS = ("Sorry, you have been blocked", "Attention Required! | Cloudflare",
+                     "cf-error-details")
+
+
+def _cloudflare_block(err):
+    """HTTPError가 Cloudflare 차단 페이지면 (IP, Ray ID) 를, 아니면 None 을 돌려준다.
+    차단 페이지는 HTML이고 'Sorry, you have been blocked' 문구가 있다(실측 2026-11-19).
+    CBOE의 '없는 심볼' 403에는 이 문구가 없다."""
+    if getattr(err, "code", None) != 403:
+        return None
+    hdr = err.headers if err.headers is not None else {}
+    if str(hdr.get("cf-mitigated") or "").lower() == "challenge":
+        return ("?", str(hdr.get("cf-ray") or "?"))
+    try:
+        body = err.read(65536)
+    except Exception:
+        return None
+    text = body.decode("utf-8", "replace") if isinstance(body, (bytes, bytearray)) else str(body or "")
+    if not any(m in text for m in _CF_BLOCK_MARKERS):
+        return None
+    ip = re.search(r'id="cf-footer-ip"[^>]*>\s*([0-9a-fA-F.:]+)', text)
+    ray = re.search(r"Ray ID:?\s*(?:<[^>]+>\s*)*([0-9a-f]{12,})", text)
+    return (ip.group(1) if ip else "?",
+            ray.group(1) if ray else str(hdr.get("cf-ray") or "?"))
+
+
+def _site_blocked(host, ip, ray):
+    return SiteBlockedError(
+        f"{host} 의 Cloudflare 보안이 이 환경의 접속 IP({ip})를 차단했다(403 'Sorry, you have "
+        f"been blocked', Ray ID {ray}). 허용 도메인 문제가 아니며 코드로 풀 수 없다 - "
+        f"나중에 다시 실행하거나(클라우드 IP가 바뀌면 풀릴 수 있음) 다른 네트워크에서 실행해야 한다")
+
+
 def fetch_json(url, max_retries=2, _sleep=time.sleep):
     """URL에서 JSON을 받는다. max_retries=0이어도 최초 1회는 반드시 시도한다.
 
@@ -392,6 +438,10 @@ def fetch_json(url, max_retries=2, _sleep=time.sleep):
                 if e.headers and e.headers.get("x-deny-reason"):
                     raise _egress_blocked(
                         _final_host(req), f"x-deny-reason={e.headers['x-deny-reason']}")
+                # Cloudflare 차단 페이지는 '없는 심볼'이 아니라 접속 IP 차단이다.
+                cf = _cloudflare_block(e)
+                if cf:
+                    raise _site_blocked(_final_host(req), *cf)
                 raise NoDataError(url)
             last_err = e
             if i + 1 >= attempts:
@@ -420,7 +470,7 @@ def request_refresh(ticker, timeout=10):
 
     반환: True(접수됨) / False(CBOE가 거절 - 거래가 끊긴 종목은 400을 준다) /
           None(요청을 보내지 못함 - 시간 초과 등 접속 문제).
-    환경이 www.cboe.com 접속을 막으면 EgressBlockedError.
+    환경이 www.cboe.com 접속을 막으면 EgressBlockedError, Cloudflare가 IP를 막으면 SiteBlockedError.
     """
     req = urllib.request.Request(REFRESH_URL.format(sym=urllib.parse.quote(ticker)),
                                  headers=UA_HEADERS)
@@ -431,6 +481,9 @@ def request_refresh(ticker, timeout=10):
     except urllib.error.HTTPError as e:
         if e.code == 403 and e.headers and e.headers.get("x-deny-reason"):
             raise _egress_blocked(_final_host(req), f"x-deny-reason={e.headers['x-deny-reason']}")
+        cf = _cloudflare_block(e)
+        if cf:
+            raise _site_blocked(_final_host(req), *cf)
         return False
     except Exception as e:
         if _is_proxy_connect_403(e):
@@ -469,7 +522,7 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2, report=None):
         refresh["left"] -= 1
         try:
             accepted = request_refresh(t)
-        except EgressBlockedError:
+        except (EgressBlockedError, SiteBlockedError):
             refresh["on"], rep["refresh_blocked"] = False, True
             return None
         if accepted is None:  # 접속 문제가 두 번 이어지면 이번 실행에서는 더 보내지 않는다
@@ -543,6 +596,10 @@ def collect(tickers, date, root_dir, sleep=0.3, max_retries=2, report=None):
             # 환경 차단은 전체 즉시 중단. 단 이미 성공이 있으면 호스트가 허용돼 있다는
             # 뜻이므로(프록시 403은 일시 장애일 수도 있음) 일반 실패로 세고 계속한다.
             if isinstance(e, EgressBlockedError) and not ok:
+                raise
+            # Cloudflare IP 차단은 몇 분 안에 풀리지 않는다. 중간에 걸려도 남은 종목을 모두
+            # 실패로 갈아 넣지 말고 바로 멈춘다(어차피 성공률 미달로 아카이브가 안 만들어진다).
+            if isinstance(e, SiteBlockedError):
                 raise
             failed.append((t, str(e)[:120]))
             retry.append(t)
@@ -754,7 +811,7 @@ def main(argv=None):
         try:
             ok, no_data, failed = collect(tickers, date, tmp_root, sleep=args.sleep,
                                           max_retries=args.max_retries, report=report)
-        except (EgressBlockedError, SystemicFailureError) as e:
+        except (EgressBlockedError, SiteBlockedError, SystemicFailureError) as e:
             print(f"ERROR: {e}")
             return 1
         # 순수 성공 비율만 센다. no_data(미상장)는 소수여야 정상이며, 만약
